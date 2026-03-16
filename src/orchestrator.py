@@ -822,13 +822,56 @@ class TradingOrchestrator:
         )
 
         if not result.allowed:
-            self._actions_blocked += 1
-            logger.info(
-                "orchestrator.action_blocked",
-                reason=result.reason,
-                action=action.action.value,
-            )
-            return
+            # ── Auto-reverse: ENTER opposite side → convert to FLATTEN ──
+            # When the LLM wants to reverse direction (e.g., ENTER SHORT
+            # while LONG), it really means "flatten then enter opposite".
+            # We convert to FLATTEN here; the LLM will enter the new
+            # direction on the next decision cycle.
+            if (
+                action.action == ActionType.ENTER
+                and position is not None
+                and action.side is not None
+                and action.side != position.side
+                and "position_limit" in (result.reason or "")
+            ):
+                logger.info(
+                    "orchestrator.auto_reverse_flatten",
+                    current_side=position.side.value,
+                    wanted_side=action.side.value,
+                    msg="LLM wanted to reverse — converting to FLATTEN",
+                )
+                action = LLMAction(
+                    action=ActionType.FLATTEN,
+                    reasoning=f"Auto-reverse: LLM wanted {action.side.value} but in {position.side.value} position. Flattening first.",
+                    confidence=action.confidence,
+                    model_used=action.model_used,
+                    latency_ms=action.latency_ms,
+                )
+                # Re-run guardrails on the FLATTEN action
+                result = self._guardrails.check(
+                    action=action,
+                    state=state,
+                    position=position,
+                    daily_pnl=self._session_ctrl.daily_pnl,
+                    consecutive_losers=self._session_ctrl.consecutive_losers,
+                    effective_max_contracts=self._session_ctrl.effective_max_contracts,
+                )
+                if not result.allowed:
+                    self._actions_blocked += 1
+                    logger.info(
+                        "orchestrator.auto_reverse_also_blocked",
+                        reason=result.reason,
+                    )
+                    return
+                # Fall through to execute the FLATTEN
+            else:
+                self._actions_blocked += 1
+                logger.info(
+                    "orchestrator.action_blocked",
+                    reason=result.reason,
+                    action=action.action.value,
+                )
+                return
 
         # 5a. Apex rule check (runs AFTER standard guardrails)
         if self._apex:
