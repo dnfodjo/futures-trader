@@ -498,7 +498,19 @@ class TradingOrchestrator:
                     self._shutdown_event.set()
                     return
 
-        # 1a. Update Apex equity tracking (balance + unrealized P&L)
+        # 1a. Check daily loss kill switch — flatten if P&L exceeds limit
+        if self._kill_switch:
+            self._kill_switch.check_daily_loss(self._session_ctrl.daily_pnl)
+            if self._kill_switch.is_triggered:
+                logger.critical(
+                    "orchestrator.kill_switch_daily_loss",
+                    daily_pnl=self._session_ctrl.daily_pnl,
+                )
+                await self._hard_flatten("Kill switch: daily loss limit")
+                self._shutdown_event.set()
+                return
+
+        # 1b. Update Apex equity tracking (balance + unrealized P&L)
         if self._apex:
             position = self._position_tracker.position
             equity = (
@@ -543,6 +555,12 @@ class TradingOrchestrator:
 
         # 2a. Trail manager — update trailing stop if in position
         if position is not None and self._trail_manager:
+            # Activate trail manager if not yet active (handles delayed
+            # position sync — fill arrives via REST reconciliation after
+            # the initial execute() call)
+            if not self._trail_manager.is_active:
+                self._trail_manager.activate(position, state.last_price)
+
             new_stop = self._trail_manager.update(state.last_price)
             if new_stop is not None:
                 self._trail_updates += 1
@@ -657,6 +675,12 @@ class TradingOrchestrator:
             return
 
         if action.action == ActionType.STOP_TRADING:
+            # Flatten any open position FIRST, then stop trading
+            position = self._position_tracker.position
+            if position is not None:
+                await self._hard_flatten(
+                    f"STOP_TRADING: {action.reasoning or 'LLM requested'}"
+                )
             self._session_ctrl.force_stop(
                 action.reasoning or "LLM requested stop trading"
             )
