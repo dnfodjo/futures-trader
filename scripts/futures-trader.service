@@ -2,6 +2,8 @@
 Description=MNQ Futures Trading System
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -15,8 +17,6 @@ ExecStart=/opt/futures-trader/.venv/bin/python -m src.main --paper
 # Restart policy — restart on crash, not on clean exit
 Restart=on-failure
 RestartSec=30
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 # Graceful shutdown — send SIGTERM, wait 60s for position flatten, then SIGKILL
 # The trading system catches SIGTERM, flattens any open position, runs postmortem,

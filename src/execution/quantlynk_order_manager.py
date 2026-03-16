@@ -30,6 +30,11 @@ from src.core.types import (
 )
 from src.execution.quantlynk_client import QuantLynkClient
 
+# Avoid circular import — PositionTracker imported at type-check time only
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.execution.position_tracker import PositionTracker
+
 logger = structlog.get_logger()
 
 
@@ -51,12 +56,14 @@ class QuantLynkOrderManager:
         symbol: str = "MNQM6",
         default_stop_distance: float = 10.0,
         point_value: float = 2.0,
+        position_tracker: Optional[Any] = None,
     ) -> None:
         self._client = client
         self._bus = event_bus
         self._symbol = symbol
         self._default_stop_distance = default_stop_distance
         self._point_value = point_value
+        self._position_tracker = position_tracker
 
         # Internal position tracking (since we don't get fills back from QuantLynk)
         self._current_stop_price: Optional[float] = None
@@ -151,6 +158,27 @@ class QuantLynkOrderManager:
             ))
             return {"status": "error", "error": str(e)}
 
+    # ── Position Tracker Sync ────────────────────────────────────────────────
+
+    async def _sync_fill(self, action: str, qty: int, price: float) -> None:
+        """Notify the PositionTracker of an assumed fill.
+
+        Since QuantLynk is fire-and-forget (market orders assumed filled),
+        we immediately update the position tracker as if the fill occurred.
+        """
+        if self._position_tracker is None:
+            return
+
+        fill_data = {
+            "action": action,  # "Buy" or "Sell"
+            "qty": qty,
+            "price": price,
+        }
+        try:
+            await self._position_tracker.on_fill(fill_data)
+        except Exception:
+            logger.warning("quantlynk_om.fill_sync_failed", exc_info=True)
+
     # ── ENTER ──────────────────────────────────────────────────────────────────
 
     async def _execute_enter(
@@ -185,6 +213,10 @@ class QuantLynkOrderManager:
             self._current_stop_price = round(last_price - stop_distance, 2)
         else:
             self._current_stop_price = round(last_price + stop_distance, 2)
+
+        # Sync fill to position tracker
+        fill_action = "Buy" if side == Side.LONG else "Sell"
+        await self._sync_fill(fill_action, quantity, last_price)
 
         logger.info(
             "quantlynk_om.enter",
@@ -236,6 +268,10 @@ class QuantLynkOrderManager:
         self._orders_placed += 1
         self._orders_filled += 1
 
+        # Sync fill to position tracker (same side = add)
+        fill_action = "Buy" if position.side == Side.LONG else "Sell"
+        await self._sync_fill(fill_action, quantity, last_price)
+
         logger.info(
             "quantlynk_om.add",
             side=position.side.value,
@@ -283,6 +319,10 @@ class QuantLynkOrderManager:
 
         self._orders_placed += 1
         self._orders_filled += 1
+
+        # Sync fill to position tracker (opposite side = reduce/close)
+        fill_action = "Sell" if position.side == Side.LONG else "Buy"
+        await self._sync_fill(fill_action, quantity, last_price)
 
         logger.info(
             "quantlynk_om.scale_out",
@@ -346,11 +386,19 @@ class QuantLynkOrderManager:
 
     async def _execute_flatten(self, last_price: float) -> dict[str, Any]:
         """Flatten all positions via QuantLynk."""
+        # Get position info BEFORE flatten for fill sync
+        pos = self._position_tracker.position if self._position_tracker else None
+
         result = await self._client.flatten(price=last_price)
 
         self._orders_placed += 1
         self._orders_filled += 1
         self._current_stop_price = None
+
+        # Sync fill to position tracker (opposite side closes position)
+        if pos is not None:
+            fill_action = "Sell" if pos.side == Side.LONG else "Buy"
+            await self._sync_fill(fill_action, pos.quantity, last_price)
 
         logger.info("quantlynk_om.flatten", price=last_price)
 

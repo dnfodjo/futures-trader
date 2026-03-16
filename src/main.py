@@ -305,6 +305,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
             symbol=trading.symbol,
             default_stop_distance=10.0,
             point_value=trading.point_value,
+            position_tracker=position_tracker,
         )
 
     else:
@@ -578,9 +579,8 @@ async def _connect_tradovate(
     )
     components["tradovate_ws"] = ws
 
-    # Register WS event handlers
-    ws.on_position_update(position_tracker.on_ws_position_update)
-    ws.on_order_update(position_tracker.on_ws_order_update)
+    # Register WS event handlers — fills update position tracker
+    ws.on_fill(position_tracker.on_fill)
 
     await ws.connect()
     logger.info("main.tradovate_ws_connected")
@@ -784,7 +784,7 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
 
         def _signal_handler(sig: signal.Signals) -> None:
             logger.info("main.signal_received", signal=sig.name)
-            asyncio.ensure_future(orchestrator.stop())
+            loop.create_task(orchestrator.stop())
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _signal_handler, sig)

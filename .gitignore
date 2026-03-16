@@ -15,7 +15,8 @@ build/
 venv/
 
 # ── Data (generated at runtime) ──────────────────────────────────────
-data/
+# Only ignore the top-level data/ directory (runtime data), NOT src/data/ (source code)
+/data/
 *.db
 *.db-shm
 *.db-wal
@@ -28,6 +29,7 @@ data/
 htmlcov/
 .coverage
 *.lock
+!uv.lock
 
 # ── OS ────────────────────────────────────────────────────────────────
 .DS_Store

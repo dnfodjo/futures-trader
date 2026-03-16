@@ -524,8 +524,22 @@ class TradingOrchestrator:
             except Exception:
                 logger.debug("orchestrator.regime_tracking_failed", exc_info=True)
 
-        # 2. Get current position
+        # 2. Get current position and update unrealized P&L
         position = self._position_tracker.position
+        if position is not None:
+            self._position_tracker.update_unrealized(state.last_price)
+
+        # 2-pre. QuantLynk software stop check (no native broker stops)
+        if (position is not None
+                and isinstance(self._order_manager, QuantLynkOrderManager)
+                and self._order_manager.check_stop_hit(state.last_price, position.side)):
+            logger.warning(
+                "orchestrator.software_stop_hit",
+                price=state.last_price,
+                stop=self._order_manager.current_stop_price,
+            )
+            await self._hard_flatten("Software stop hit")
+            return
 
         # 2a. Trail manager — update trailing stop if in position
         if position is not None and self._trail_manager:
@@ -769,16 +783,24 @@ class TradingOrchestrator:
                 elif action.action == ActionType.FLATTEN:
                     self._trail_manager.deactivate()
 
-            # 7b. Log completed trade to journal on flatten/scale_out
+            # 7b. Log completed trade + update session P&L on flatten/scale_out
             if action.action in (ActionType.FLATTEN, ActionType.SCALE_OUT):
-                if self._trade_logger:
-                    last_trade = self._position_tracker.last_trade
-                    if last_trade:
+                last_trade = self._position_tracker.last_trade
+                if last_trade:
+                    # Update session controller (daily P&L, win/loss, limits)
+                    try:
+                        self._session_ctrl.record_trade(last_trade)
+                    except Exception:
+                        logger.warning("orchestrator.session_record_failed", exc_info=True)
+
+                    # Log to trade journal
+                    if self._trade_logger:
                         try:
                             self._trade_logger.log_trade(last_trade)
                             logger.info(
                                 "orchestrator.trade_logged",
                                 pnl=round(last_trade.pnl, 2),
+                                daily_pnl=round(self._session_ctrl.daily_pnl, 2),
                             )
                         except Exception:
                             logger.warning("orchestrator.trade_log_failed", exc_info=True)
@@ -1176,6 +1198,20 @@ class TradingOrchestrator:
                 position=position,
                 last_price=self._last_state.last_price if self._last_state else 0.0,
             )
+
+            # Record the trade to session controller and journal
+            last_trade = self._position_tracker.last_trade
+            if last_trade:
+                try:
+                    self._session_ctrl.record_trade(last_trade)
+                except Exception:
+                    logger.warning("orchestrator.hard_flatten_session_record_failed", exc_info=True)
+                if self._trade_logger:
+                    try:
+                        self._trade_logger.log_trade(last_trade)
+                    except Exception:
+                        logger.warning("orchestrator.hard_flatten_trade_log_failed", exc_info=True)
+
         except Exception:
             logger.exception("orchestrator.hard_flatten_failed")
             self._errors += 1
