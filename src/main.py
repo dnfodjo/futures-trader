@@ -366,7 +366,13 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
     telegram: Optional[TelegramClient] = None
     alert_manager: Optional[AlertManager] = None
 
-    if config.telegram.bot_token and config.telegram.chat_id:
+    _tg_token = config.telegram.bot_token or ""
+    _tg_chat = config.telegram.chat_id or ""
+    _tg_configured = (
+        _tg_token not in ("", "your_telegram_bot_token")
+        and _tg_chat not in ("", "your_telegram_chat_id")
+    )
+    if _tg_configured:
         telegram = TelegramClient(
             bot_token=config.telegram.bot_token,
             chat_id=config.telegram.chat_id,
