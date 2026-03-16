@@ -398,6 +398,17 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
 
     trade_logger = TradeLogger(db_path=journal_path)
 
+    # Reset journal on startup during testing — MUST happen before
+    # circuit breakers load history, otherwise stale phantom PnL
+    # causes monthly loss shutdown.
+    # Remove this block once system is stable and in production.
+    try:
+        trade_logger.reset_all()
+        logger.info("main.journal_reset_for_testing",
+                    msg="SQLite journal cleared on startup (testing mode)")
+    except Exception:
+        logger.warning("main.journal_reset_failed", exc_info=True)
+
     postmortem_analyzer = PostmortemAnalyzer(llm_client=llm_client)
 
     regime_tracker = RegimeTracker(db_path=journal_path)
@@ -681,18 +692,6 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
 
     state_engine: StateEngine = components["state_engine"]
     trade_logger: TradeLogger = components["trade_logger"]
-
-    # ── Reset SQLite journal on startup (testing mode) ────────────────
-    # During the testing/monitoring phase, reset the journal each restart
-    # so circuit breakers and session stats start clean.
-    # Remove this block once system is stable and running in production.
-    if trade_logger:
-        try:
-            trade_logger.reset_all()
-            logger.info("main.journal_reset_for_testing",
-                        msg="SQLite journal cleared on startup (testing mode)")
-        except Exception:
-            logger.warning("main.journal_reset_failed", exc_info=True)
     postmortem_analyzer: PostmortemAnalyzer = components["postmortem_analyzer"]
     event_bus: EventBus = components["event_bus"]
 
