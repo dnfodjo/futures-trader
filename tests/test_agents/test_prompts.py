@@ -12,7 +12,7 @@ from src.agents.prompts.system_prompt import (
 class TestSystemPrompt:
     def test_system_prompt_exists(self) -> None:
         assert len(SYSTEM_PROMPT) > 100
-        assert "elite" in SYSTEM_PROMPT.lower()
+        assert "autonomous" in SYSTEM_PROMPT.lower()
         assert "DO_NOTHING" in SYSTEM_PROMPT
 
     def test_trading_decision_tool_schema(self) -> None:
