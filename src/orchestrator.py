@@ -360,13 +360,23 @@ class TradingOrchestrator:
         self._reasoner.clear_session()
 
         # Wait for trading start
+        logger.info(
+            "orchestrator.waiting_for_trading_start",
+            is_trading_time=self._is_trading_time(),
+            trading_start=self._trading_start,
+            trading_end=self._trading_end,
+            shutdown_set=self._shutdown_event.is_set(),
+        )
         while not self._shutdown_event.is_set():
             if self._is_trading_time():
                 break
             await asyncio.sleep(5)
 
         if self._shutdown_event.is_set():
+            logger.info("orchestrator.shutdown_before_trading")
             return
+
+        logger.info("orchestrator.trading_time_reached")
 
         # 3. Start background tasks: heartbeat + position reconciliation
         self._background_tasks: list[asyncio.Task] = []
