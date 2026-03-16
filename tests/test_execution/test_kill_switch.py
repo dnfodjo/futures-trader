@@ -44,6 +44,8 @@ class TestFlashCrash:
     def test_crash_detected_large_move(self, kill_switch):
         base = 1000.0
         kill_switch.check_flash_crash(19850.0, base)
+        kill_switch.check_flash_crash(19845.0, base + 10)  # intermediate sample
+        kill_switch.check_flash_crash(19840.0, base + 20)  # 3rd sample, past warmup
         result = kill_switch.check_flash_crash(19800.0, base + 30)  # 50pt drop in 30s
 
         assert result is True
@@ -62,6 +64,8 @@ class TestFlashCrash:
     def test_crash_exactly_at_threshold(self, kill_switch):
         base = 1000.0
         kill_switch.check_flash_crash(19850.0, base)
+        kill_switch.check_flash_crash(19845.0, base + 10)
+        kill_switch.check_flash_crash(19840.0, base + 20)  # warmup satisfied
         result = kill_switch.check_flash_crash(19800.0, base + 59)  # exactly 50pts
 
         assert result is True
@@ -69,6 +73,8 @@ class TestFlashCrash:
     def test_crash_just_below_threshold(self, kill_switch):
         base = 1000.0
         kill_switch.check_flash_crash(19850.0, base)
+        kill_switch.check_flash_crash(19845.0, base + 10)
+        kill_switch.check_flash_crash(19840.0, base + 20)  # warmup satisfied
         result = kill_switch.check_flash_crash(19801.0, base + 30)  # 49pts
 
         assert result is False
