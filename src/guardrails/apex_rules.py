@@ -338,18 +338,24 @@ class ApexRuleGuardrail:
 
         This is separate from check() because FLATTEN should never be blocked.
         The orchestrator should call this and initiate a FLATTEN if True.
+        Only applies in the narrow pre-halt window (flatten_deadline to 17:00 ET),
+        NOT after 18:00 when a new Globex session has begun.
         """
         now_et = state.timestamp.astimezone(ET)
         current_time = now_et.time()
-        return current_time >= self._flatten_deadline
+        return self._flatten_deadline <= current_time < time(17, 0)
 
     def _check_flatten_deadline(self, state: MarketState) -> Optional[GuardrailResult]:
-        """Block new entries within 5 minutes of Apex closing deadline."""
+        """Block new entries within 5 minutes of Apex closing deadline.
+
+        Only applies in the narrow pre-halt window (flatten_deadline to 17:00 ET).
+        After 18:00 ET, a new Globex session has started and trading is allowed.
+        """
         now_et = state.timestamp.astimezone(ET)
         current_time = now_et.time()
 
-        # Block new entries after the flatten deadline
-        if current_time >= self._flatten_deadline:
+        # Block new entries only in the pre-halt window
+        if self._flatten_deadline <= current_time < time(17, 0):
             self._blocks += 1
             return GuardrailResult(
                 allowed=False,

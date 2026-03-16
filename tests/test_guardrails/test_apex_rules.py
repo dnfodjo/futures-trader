@@ -398,6 +398,32 @@ class TestFlattenDeadline:
         state = _make_state(16, 54)
         assert self.g.should_force_flatten(state) is True
 
+    def test_should_force_flatten_not_after_halt(self):
+        """Flatten should NOT trigger after daily halt (17:00+) or in new session (18:00+)."""
+        # During daily halt — NOT a flatten window
+        state_halt = _make_state(17, 30)
+        assert self.g.should_force_flatten(state_halt) is False
+
+        # New session (Asian) — definitely not flatten
+        state_asian = _make_state(18, 30)
+        assert self.g.should_force_flatten(state_asian) is False
+
+        # Overnight — not flatten
+        state_overnight = _make_state(2, 0)
+        assert self.g.should_force_flatten(state_overnight) is False
+
+    def test_flatten_deadline_blocks_entry_only_pre_halt(self):
+        """Entry blocking should only apply in pre-halt window, not after 18:00."""
+        # 4:55 PM — should block
+        state_pre_halt = _make_state(16, 55)
+        result = self.g.check(_make_action(ActionType.ENTER), state_pre_halt)
+        assert result.allowed is False
+
+        # 6:30 PM — new session, should allow
+        state_new_session = _make_state(18, 30)
+        result = self.g.check(_make_action(ActionType.ENTER), state_new_session)
+        assert result.allowed is True
+
     def test_custom_earlier_deadline(self):
         g = ApexRuleGuardrail(flatten_deadline_et=time(16, 45))
         state = _make_state(16, 46)
