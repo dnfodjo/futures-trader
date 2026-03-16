@@ -23,8 +23,10 @@ Each cycle:
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -54,6 +56,10 @@ from src.data.tick_processor import TickProcessor
 logger = structlog.get_logger()
 
 ET = ZoneInfo("US/Eastern")
+
+# ── Bar Persistence ──────────────────────────────────────────────────────────
+_BAR_PERSIST_DIR = Path("data")
+_BAR_PERSIST_INTERVAL = 5  # save every N new bars (not every bar to avoid I/O)
 
 # ── Price Action Summary Constants ───────────────────────────────────────────
 
@@ -462,6 +468,9 @@ class StateEngine:
             # Keep max 120 bars (2 hours of 1-min data) for indicators
             if len(self._1min_bars) > 120:
                 self._1min_bars = self._1min_bars[-120:]
+            # Persist to disk periodically for restart recovery
+            if len(self._1min_bars) % _BAR_PERSIST_INTERVAL == 0:
+                self._persist_bars()
             # Start new bar
             self._1min_bar_start = now
             self._current_1min_bar = {
@@ -1082,3 +1091,62 @@ class StateEngine:
             first_ts=self._1min_bars[0].get("timestamp", "?") if self._1min_bars else "?",
             last_ts=self._1min_bars[-1].get("timestamp", "?") if self._1min_bars else "?",
         )
+
+    def _persist_bars(self) -> None:
+        """Save current 1-min bars to disk for restart recovery.
+
+        Written as a simple JSON file. Only bars from today's RTH session
+        are saved. File is named by date so old files don't interfere.
+        """
+        try:
+            today_str = datetime.now(ET).strftime("%Y-%m-%d")
+            path = _BAR_PERSIST_DIR / f"1min_bars_{today_str}.json"
+            _BAR_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self._1min_bars, default=str))
+            logger.info(
+                "state_engine.bars_persisted",
+                bar_count=len(self._1min_bars),
+                path=str(path),
+            )
+        except Exception:
+            logger.warning("state_engine.bars_persist_failed", exc_info=True)
+
+    def reload_persisted_bars(self) -> bool:
+        """Reload 1-min bars from disk if available for today.
+
+        Call AFTER reset_for_rth() to restore indicator state.
+
+        Returns:
+            True if bars were loaded, False otherwise.
+        """
+        try:
+            today_str = datetime.now(ET).strftime("%Y-%m-%d")
+            path = _BAR_PERSIST_DIR / f"1min_bars_{today_str}.json"
+            if not path.exists():
+                logger.info("state_engine.no_persisted_bars", path=str(path))
+                return False
+
+            bars = json.loads(path.read_text())
+            if not bars or not isinstance(bars, list):
+                logger.info("state_engine.persisted_bars_empty", path=str(path))
+                return False
+
+            # Validate bar format
+            required_keys = {"open", "high", "low", "close"}
+            if not required_keys.issubset(bars[0].keys()):
+                logger.warning(
+                    "state_engine.persisted_bars_invalid_format",
+                    keys=list(bars[0].keys()),
+                )
+                return False
+
+            self.warm_1min_bars(bars)
+            logger.info(
+                "state_engine.bars_reloaded_from_disk",
+                bar_count=len(self._1min_bars),
+                path=str(path),
+            )
+            return True
+        except Exception:
+            logger.warning("state_engine.bars_reload_failed", exc_info=True)
+            return False

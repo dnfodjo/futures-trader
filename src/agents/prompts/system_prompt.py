@@ -28,7 +28,8 @@ You now receive EMAs, RSI, MACD, ATR, market structure, opening range, and pivot
 1. **EMA Alignment**: Check `emas.alignment`:
    - "bullish" (EMA9 > EMA21 > EMA50) = UPTREND → look for LONG entries only
    - "bearish" (EMA9 < EMA21 < EMA50) = DOWNTREND → look for SHORT entries only
-   - "mixed" = NO CLEAR TREND → be very selective, smaller size
+   - "bullish_partial" / "bearish_partial" (EMA9 vs EMA21 only, EMA50 not yet available) = probable trend direction, treat same as full alignment but use slightly lower confidence
+   - "mixed" or "mixed_partial" = NO CLEAR TREND → be very selective, smaller size
 2. **Market Structure**: Check `market_structure.pattern`:
    - "HH_HL" (higher highs, higher lows) = UPTREND confirmation
    - "LH_LL" (lower highs, lower lows) = DOWNTREND confirmation
