@@ -886,12 +886,11 @@ async def _load_prior_day_levels(
         yesterday -= timedelta(days=1)
 
     try:
-        trades = await asyncio.to_thread(
-            DatabentoClient.fetch_historical,
+        trades = await DatabentoClient.fetch_historical(
             api_key=config.databento.api_key,
             symbol=config.trading.symbol,
-            start_date=yesterday.isoformat(),
-            end_date=today.isoformat(),
+            start=yesterday.isoformat(),
+            end=today.isoformat(),
         )
 
         if not trades:
