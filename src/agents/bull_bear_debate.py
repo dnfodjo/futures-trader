@@ -280,6 +280,7 @@ class BullBearDebate:
                 new_stop_price=tool_input.get("new_stop_price"),
                 reasoning=tool_input.get("reasoning", ""),
                 confidence=max(0.0, min(1.0, float(tool_input.get("confidence", 0.5)))),
+                setup_type=tool_input.get("setup_type"),
                 model_used=self._synthesis_model,
                 latency_ms=response.latency_ms,
             )
@@ -292,6 +293,86 @@ class BullBearDebate:
                 confidence=0.0,
                 model_used=self._synthesis_model,
                 latency_ms=response.latency_ms,
+            )
+
+    async def quick_decide(
+        self,
+        state: MarketState,
+        detected_setups: str = "",
+        price_action_narrative: str = "",
+    ) -> DebateResult:
+        """Fast single Sonnet call — skips bull/bear phase for ~3-4s latency.
+
+        Use when speed matters more than depth (e.g., volatile markets,
+        time-sensitive entries). Produces a direct decision without the
+        intermediate debate arguments.
+        """
+        start = time.monotonic()
+        state_json = json.dumps(state.to_llm_dict(), indent=2)
+
+        enriched_json = state_json
+        if detected_setups or price_action_narrative:
+            parts = [state_json]
+            if detected_setups:
+                parts.append(f"\n## Detected Setups\n{detected_setups}")
+            if price_action_narrative:
+                parts.append(f"\n## Price Action\n{price_action_narrative}")
+            enriched_json = "\n".join(parts)
+
+        # Single Sonnet call with both-sides prompt
+        user_msg = (
+            f"Analyze this market state. Consider BOTH the bull and bear case "
+            f"before making your decision. Think about: What setup is present? "
+            f"Does the trend (EMAs, structure) support this direction? "
+            f"Is the risk:reward favorable?\n\n"
+            f"Market state:\n```json\n{enriched_json}\n```"
+        )
+
+        try:
+            response = await self._llm.call(
+                system=SYNTHESIS_SYSTEM,
+                messages=[{"role": "user", "content": user_msg}],
+                model=self._synthesis_model,
+                tools=[TRADING_DECISION_TOOL],
+                tool_choice={"type": "tool", "name": "trading_decision"},
+                max_tokens=512,
+                temperature=0.2,
+            )
+
+            action = self._parse_synthesis(response)
+            total_latency = int((time.monotonic() - start) * 1000)
+            self._debate_count += 1
+
+            logger.info(
+                "debate.quick_decide",
+                action=action.action.value,
+                side=action.side.value if action.side else None,
+                confidence=action.confidence,
+                latency_ms=total_latency,
+                cost=round(response.cost, 4),
+            )
+
+            return DebateResult(
+                bull_argument="(quick decide — no separate arguments)",
+                bear_argument="(quick decide — no separate arguments)",
+                action=action,
+                total_latency_ms=total_latency,
+                total_cost=response.cost,
+            )
+
+        except (LLMCallFailed, LLMCostCapExceeded) as e:
+            logger.error("debate.quick_decide_failed", error=str(e))
+            return DebateResult(
+                bull_argument="",
+                bear_argument="",
+                action=LLMAction(
+                    action=ActionType.DO_NOTHING,
+                    reasoning=f"Quick decide failed: {e}",
+                    confidence=0.0,
+                    model_used=self._synthesis_model,
+                ),
+                total_latency_ms=int((time.monotonic() - start) * 1000),
+                total_cost=0.0,
             )
 
     @property

@@ -136,6 +136,7 @@ class TradingOrchestrator:
         circuit_breakers: Optional[CircuitBreakers] = None,
         apex_guardrail: Optional[ApexRuleGuardrail] = None,
         rth_reset_fn: Optional[Callable[[], None]] = None,
+        session_stats_fn: Optional[Callable[..., Coroutine]] = None,
     ) -> None:
         self._config = config
         self._bus = event_bus
@@ -170,6 +171,7 @@ class TradingOrchestrator:
         self._circuit_breakers = circuit_breakers
         self._apex = apex_guardrail
         self._rth_reset_fn = rth_reset_fn
+        self._session_stats_fn = session_stats_fn
 
         # ── Internal state ──────────────────────────────────────────────────
 
@@ -194,6 +196,11 @@ class TradingOrchestrator:
         self._trail_updates: int = 0
         self._cycle_count: int = 0
         self._errors: int = 0
+
+        # Post-trade thesis tracking: monitor price after exit to see
+        # if the directional thesis was correct (helps LLM learn intra-session)
+        self._thesis_tracker: list[dict] = []  # pending thesis checks
+        self._thesis_results: list[dict] = []  # completed thesis outcomes
         self._consecutive_errors: int = 0
         self._max_consecutive_errors: int = 3  # kill switch threshold
         self._start_time: Optional[float] = None
@@ -787,7 +794,7 @@ class TradingOrchestrator:
         # 4a. Bull/bear debate for ENTER decisions (higher quality entries)
         if action.action == ActionType.ENTER and self._debate:
             try:
-                debate_result = await self._debate.run(
+                debate_result = await self._debate.quick_decide(
                     state,
                     detected_setups=detected_setups_text,
                     price_action_narrative=price_narrative,
@@ -1052,11 +1059,15 @@ class TradingOrchestrator:
                         # Get take profit from the action (if LLM specified one)
                         tp_price = getattr(action, "take_profit_price", 0.0) or 0.0
 
+                        # Pass ATR for dynamic trail distance
+                        current_atr = getattr(state, "atr", 0.0) if state else 0.0
+
                         self._tick_stop_monitor.activate(
                             side=new_position.side.value,
                             entry_price=last_price,
                             stop_price=stop_price,
                             take_profit_price=tp_price,
+                            atr=current_atr,
                         )
                         logger.info(
                             "orchestrator.tick_stop_monitor_activated",
@@ -1090,7 +1101,33 @@ class TradingOrchestrator:
                         except Exception:
                             logger.warning("orchestrator.trade_log_failed", exc_info=True)
 
-            # 7b. Record level interaction for Reasoner memory
+                    # Sync session stats to state engine (for max_daily_trades guardrail)
+                    if self._session_stats_fn:
+                        try:
+                            await self._session_stats_fn(
+                                daily_pnl=self._session_ctrl.daily_pnl,
+                                daily_trades=self._session_ctrl.total_trades,
+                                daily_winners=self._session_ctrl.winners,
+                                daily_losers=self._session_ctrl.losers,
+                            )
+                        except Exception:
+                            logger.warning("orchestrator.session_stats_sync_failed", exc_info=True)
+
+            # 7c. Post-trade thesis tracking: record exit for monitoring
+            if action.action == ActionType.FLATTEN:
+                last_trade = self._position_tracker.last_trade
+                if last_trade and last_trade.pnl is not None:
+                    self._thesis_tracker.append({
+                        "exit_time": time.monotonic(),
+                        "exit_price": state.last_price,
+                        "side": last_trade.side.value,
+                        "entry_price": last_trade.entry_price,
+                        "pnl": last_trade.pnl,
+                        "reasoning": last_trade.reasoning_entry,
+                        "check_after_sec": 300,  # check 5 min after exit
+                    })
+
+            # 7d. Record level interaction for Reasoner memory
             self._record_level_interaction(action, state)
 
             # Publish execution event
@@ -1282,10 +1319,68 @@ class TradingOrchestrator:
                     f"({dd_pct:.0%}). Be conservative."
                 )
 
+        # Post-trade thesis tracking: check completed theses and report
+        self._check_thesis_outcomes()
+        if self._thesis_results:
+            recent_theses = self._thesis_results[-3:]  # last 3
+            correct = sum(1 for t in recent_theses if t.get("correct", False))
+            total = len(recent_theses)
+            last = recent_theses[-1]
+            parts.append(
+                f"THESIS TRACKING: {correct}/{total} recent theses were correct. "
+                f"Last: {'CORRECT' if last.get('correct') else 'WRONG'} "
+                f"({last.get('side', '?')} from {last.get('entry_price', 0)}, "
+                f"target {'reached' if last.get('correct') else 'not reached'} within 5min of exit)."
+            )
+
         if not parts:
             return ""
 
         return " | ".join(parts)
+
+    def _check_thesis_outcomes(self) -> None:
+        """Check pending thesis trackers against current price."""
+        if not self._thesis_tracker:
+            return
+        state = self._get_market_state()
+        if not state or state.last_price <= 0:
+            return
+        now = time.monotonic()
+        remaining = []
+        for thesis in self._thesis_tracker:
+            elapsed = now - thesis["exit_time"]
+            if elapsed >= thesis["check_after_sec"]:
+                # Check if price moved in the thesis direction
+                entry = thesis["entry_price"]
+                exit_p = thesis["exit_price"]
+                current = state.last_price
+                side = thesis["side"]
+                # "Correct" means price moved further in the entry direction
+                if side == "long":
+                    correct = current > exit_p + 5  # price went up 5+ pts from exit
+                else:
+                    correct = current < exit_p - 5  # price went down 5+ pts from exit
+                self._thesis_results.append({
+                    "side": side,
+                    "entry_price": entry,
+                    "exit_price": exit_p,
+                    "price_after_5min": current,
+                    "pnl": thesis["pnl"],
+                    "correct": correct,
+                })
+                if len(self._thesis_results) > 10:
+                    self._thesis_results = self._thesis_results[-10:]
+                logger.info(
+                    "orchestrator.thesis_result",
+                    side=side,
+                    correct=correct,
+                    exit_price=exit_p,
+                    price_now=current,
+                    diff=round(current - exit_p, 2),
+                )
+            else:
+                remaining.append(thesis)
+        self._thesis_tracker = remaining
 
     # ── State Access ────────────────────────────────────────────────────────
 

@@ -60,6 +60,158 @@ ET = ZoneInfo("US/Eastern")
 _PRICE_ACTION_WINDOW = 30  # max bars to consider for price action summary
 _MOMENTUM_THRESHOLD = 5.0  # points of directional move to call "momentum"
 
+# ── Technical Indicator Helpers ──────────────────────────────────────────────
+
+
+def _compute_ema(prices: list[float], period: int) -> float:
+    """Compute EMA from a list of prices. Returns 0 if insufficient data."""
+    if len(prices) < period:
+        return 0.0
+    multiplier = 2.0 / (period + 1)
+    ema = sum(prices[:period]) / period  # SMA seed
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return round(ema, 2)
+
+
+def _compute_rsi(prices: list[float], period: int = 14) -> float:
+    """Compute RSI from a list of close prices. Returns 50 if insufficient data."""
+    if len(prices) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    if len(gains) < period:
+        return 50.0
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 1)
+
+
+def _compute_macd(
+    prices: list[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal_period: int = 9,
+) -> dict:
+    """Compute MACD line, signal line, and histogram.
+
+    Uses incremental EMA calculation for efficiency (O(n) instead of O(n²)).
+    """
+    if len(prices) < slow + signal_period:
+        return {}
+    # Compute fast and slow EMA incrementally
+    fast_mult = 2.0 / (fast + 1)
+    slow_mult = 2.0 / (slow + 1)
+    sig_mult = 2.0 / (signal_period + 1)
+
+    fast_ema = sum(prices[:fast]) / fast
+    slow_ema = sum(prices[:slow]) / slow
+
+    # Build MACD values from the slow period onward
+    macd_values: list[float] = []
+    for i in range(slow, len(prices)):
+        fast_ema = (prices[i] - fast_ema) * fast_mult + fast_ema
+        slow_ema = (prices[i] - slow_ema) * slow_mult + slow_ema
+        macd_values.append(fast_ema - slow_ema)
+
+    if not macd_values:
+        return {}
+
+    macd_line = round(macd_values[-1], 2)
+
+    # Compute signal line from MACD values
+    if len(macd_values) >= signal_period:
+        sig_ema = sum(macd_values[:signal_period]) / signal_period
+        for mv in macd_values[signal_period:]:
+            sig_ema = (mv - sig_ema) * sig_mult + sig_ema
+        signal_line = round(sig_ema, 2)
+    else:
+        signal_line = macd_line
+
+    histogram = round(macd_line - signal_line, 2)
+    return {"macd": macd_line, "signal": signal_line, "histogram": histogram}
+
+
+def _compute_atr(bars: list[dict], period: int = 14) -> float:
+    """Compute ATR from OHLCV bar dicts. Returns 0 if insufficient data."""
+    if len(bars) < period + 1:
+        return 0.0
+    true_ranges = []
+    for i in range(1, len(bars)):
+        high = bars[i].get("high", 0)
+        low = bars[i].get("low", 0)
+        prev_close = bars[i - 1].get("close", 0)
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+    if len(true_ranges) < period:
+        return 0.0
+    atr = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return round(atr, 2)
+
+
+def _detect_market_structure(bars: list[dict], min_swing_pts: float = 3.0) -> dict:
+    """Detect swing highs/lows and classify market structure.
+
+    Returns: {"trend": "up/down/sideways", "last_swing_high": float,
+              "last_swing_low": float, "pattern": "HH_HL/LH_LL/mixed",
+              "swing_count": int}
+    """
+    if len(bars) < 10:
+        return {}
+    # Find swing highs and lows using 3-bar pivot
+    swing_highs: list[tuple[int, float]] = []
+    swing_lows: list[tuple[int, float]] = []
+    for i in range(2, len(bars) - 2):
+        h = bars[i].get("high", 0)
+        l = bars[i].get("low", 0)
+        if (h >= bars[i - 1].get("high", 0) and h >= bars[i - 2].get("high", 0)
+                and h >= bars[i + 1].get("high", 0) and h >= bars[i + 2].get("high", 0)):
+            if not swing_highs or abs(h - swing_highs[-1][1]) >= min_swing_pts:
+                swing_highs.append((i, h))
+        if (l <= bars[i - 1].get("low", float("inf")) and l <= bars[i - 2].get("low", float("inf"))
+                and l <= bars[i + 1].get("low", float("inf")) and l <= bars[i + 2].get("low", float("inf"))):
+            if not swing_lows or abs(l - swing_lows[-1][1]) >= min_swing_pts:
+                swing_lows.append((i, l))
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return {"trend": "sideways", "pattern": "insufficient_data", "swing_count": len(swing_highs) + len(swing_lows)}
+    # Classify pattern from last 3 swing highs and lows
+    recent_highs = [h for _, h in swing_highs[-3:]]
+    recent_lows = [l for _, l in swing_lows[-3:]]
+    higher_highs = all(recent_highs[i] > recent_highs[i - 1] for i in range(1, len(recent_highs)))
+    higher_lows = all(recent_lows[i] > recent_lows[i - 1] for i in range(1, len(recent_lows)))
+    lower_highs = all(recent_highs[i] < recent_highs[i - 1] for i in range(1, len(recent_highs)))
+    lower_lows = all(recent_lows[i] < recent_lows[i - 1] for i in range(1, len(recent_lows)))
+    if higher_highs and higher_lows:
+        trend = "up"
+        pattern = "HH_HL"
+    elif lower_highs and lower_lows:
+        trend = "down"
+        pattern = "LH_LL"
+    else:
+        trend = "sideways"
+        pattern = "mixed"
+    return {
+        "trend": trend,
+        "pattern": pattern,
+        "last_swing_high": round(swing_highs[-1][1], 2),
+        "last_swing_low": round(swing_lows[-1][1], 2),
+        "prev_swing_high": round(swing_highs[-2][1], 2) if len(swing_highs) >= 2 else 0.0,
+        "prev_swing_low": round(swing_lows[-2][1], 2) if len(swing_lows) >= 2 else 0.0,
+        "swing_count": len(swing_highs) + len(swing_lows),
+    }
+
 
 class StateEngine:
     """Computes and publishes the full MarketState on a timer.
@@ -142,6 +294,19 @@ class StateEngine:
         # Recent bars for price action summary
         self._recent_bars: deque[OHLCVBar] = deque(maxlen=_PRICE_ACTION_WINDOW)
 
+        # 1-minute OHLCV bars for technical indicators
+        self._1min_bars: list[dict] = []  # list of {"open": float, "high": float, ...}
+        self._current_1min_bar: Optional[dict] = None
+        self._1min_bar_start: Optional[datetime] = None
+
+        # Opening range tracking (9:30-9:45 ET)
+        self._opening_range_high: float = 0.0
+        self._opening_range_low: float = float("inf")
+        self._opening_range_set: bool = False
+
+        # Pivot levels (computed from prior day once)
+        self._pivot_levels: dict = {}
+
         # State
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -161,10 +326,31 @@ class StateEngine:
         low: float,
         close: float,
     ) -> None:
-        """Set prior day's high, low, close. Called once at startup."""
+        """Set prior day's high, low, close. Called once at startup.
+
+        Also computes classic pivot levels (P, R1, R2, S1, S2).
+        """
         self._prior_day_high = high
         self._prior_day_low = low
         self._prior_day_close = close
+
+        # Compute classic pivot levels
+        if high > 0 and low > 0 and close > 0:
+            pivot = (high + low + close) / 3
+            self._pivot_levels = {
+                "pivot": round(pivot, 2),
+                "r1": round(2 * pivot - low, 2),
+                "r2": round(pivot + (high - low), 2),
+                "s1": round(2 * pivot - high, 2),
+                "s2": round(pivot - (high - low), 2),
+            }
+            logger.info(
+                "state_engine.pivot_levels_computed",
+                pivot=self._pivot_levels["pivot"],
+                r1=self._pivot_levels["r1"],
+                s1=self._pivot_levels["s1"],
+            )
+
         logger.info(
             "state_engine.prior_day_levels_set",
             pdh=high,
@@ -253,8 +439,63 @@ class StateEngine:
         """Callback for completed OHLCV bars from TickProcessor.
 
         Register with: tick_processor.on_bar(engine.on_bar_completed)
+        Also aggregates 1-second bars into 1-minute bars for technical indicators.
         """
         self._recent_bars.append(bar)
+
+        # ── Aggregate into 1-minute bars ──
+        now = bar.timestamp
+        # Check if we need to start a new 1-min bar
+        if self._current_1min_bar is None or self._1min_bar_start is None:
+            self._1min_bar_start = now
+            self._current_1min_bar = {
+                "timestamp": now.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+        elif (now - self._1min_bar_start).total_seconds() >= 60:
+            # Finalize the current 1-min bar
+            self._1min_bars.append(self._current_1min_bar)
+            # Keep max 120 bars (2 hours of 1-min data) for indicators
+            if len(self._1min_bars) > 120:
+                self._1min_bars = self._1min_bars[-120:]
+            # Start new bar
+            self._1min_bar_start = now
+            self._current_1min_bar = {
+                "timestamp": now.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+        else:
+            # Update the current 1-min bar
+            self._current_1min_bar["high"] = max(self._current_1min_bar["high"], bar.high)
+            self._current_1min_bar["low"] = min(self._current_1min_bar["low"], bar.low)
+            self._current_1min_bar["close"] = bar.close
+            self._current_1min_bar["volume"] = self._current_1min_bar.get("volume", 0) + bar.volume
+
+        # ── Track opening range (9:30-9:45 ET) ──
+        if not self._opening_range_set:
+            now_et = now.astimezone(ET) if now.tzinfo else now
+            hour_min = now_et.hour * 60 + now_et.minute
+            if 570 <= hour_min < 585:  # 9:30 to 9:44
+                if bar.high > self._opening_range_high:
+                    self._opening_range_high = bar.high
+                if bar.low < self._opening_range_low:
+                    self._opening_range_low = bar.low
+            elif hour_min >= 585 and self._opening_range_high > 0:  # 9:45 → lock it
+                self._opening_range_set = True
+                logger.info(
+                    "state_engine.opening_range_set",
+                    orh=self._opening_range_high,
+                    orl=self._opening_range_low,
+                    width=round(self._opening_range_high - self._opening_range_low, 2),
+                )
 
     # ── Compute Loop ─────────────────────────────────────────────────────────
 
@@ -362,7 +603,10 @@ class StateEngine:
             # 8. Generate price action summary
             price_action = self._generate_price_action_summary(tick_snap)
 
-            # 9. Assemble full MarketState
+            # 9. Compute technical indicators from 1-min bars
+            emas, rsi, macd, atr, market_structure = self._compute_technical_indicators()
+
+            # 10. Assemble full MarketState
             state = MarketState(
                 timestamp=datetime.now(tz=UTC),
                 symbol=self._symbol,
@@ -397,8 +641,18 @@ class StateEngine:
                 recent_bars=[
                     b.model_dump() for b in self._recent_bars
                 ],
+                recent_1min_bars=self._1min_bars[-10:],  # last 10 1-min bars for LLM
                 recent_trades=self._recent_trades[-5:],
                 game_plan=self._game_plan,
+                # Technical indicators
+                emas=emas,
+                market_structure=market_structure,
+                atr=atr,
+                opening_range_high=self._opening_range_high if self._opening_range_high > 0 else 0.0,
+                opening_range_low=self._opening_range_low if self._opening_range_low < float("inf") else 0.0,
+                pivot_levels=self._pivot_levels,
+                rsi=rsi,
+                macd=macd,
             )
 
             return state
@@ -494,6 +748,68 @@ class StateEngine:
                 break
             volume += bar.volume
         return volume
+
+    # ── Technical Indicator Computation ─────────────────────────────────────
+
+    def _compute_technical_indicators(
+        self,
+    ) -> tuple[dict, float, dict, float, dict]:
+        """Compute EMAs, RSI, MACD, ATR, and market structure from 1-min bars.
+
+        Returns:
+            Tuple of (emas, rsi, macd, atr, market_structure)
+        """
+        bars = self._1min_bars
+        if not bars:
+            return {}, 50.0, {}, 0.0, {}
+
+        closes = [b["close"] for b in bars]
+
+        # EMAs (9, 21, 50)
+        emas: dict = {}
+        ema_9 = _compute_ema(closes, 9)
+        ema_21 = _compute_ema(closes, 21)
+        ema_50 = _compute_ema(closes, 50)
+        if ema_9 > 0:
+            emas["ema_9"] = ema_9
+        if ema_21 > 0:
+            emas["ema_21"] = ema_21
+        if ema_50 > 0:
+            emas["ema_50"] = ema_50
+
+        # EMA alignment for trend confirmation
+        if ema_9 > 0 and ema_21 > 0 and ema_50 > 0:
+            if ema_9 > ema_21 > ema_50:
+                emas["alignment"] = "bullish"
+            elif ema_9 < ema_21 < ema_50:
+                emas["alignment"] = "bearish"
+            else:
+                emas["alignment"] = "mixed"
+
+        # EMA crossover detection (using prior bar's EMAs)
+        if len(closes) > 21:
+            prev_closes = closes[:-1]
+            prev_ema_9 = _compute_ema(prev_closes, 9)
+            prev_ema_21 = _compute_ema(prev_closes, 21)
+            if prev_ema_9 > 0 and prev_ema_21 > 0 and ema_9 > 0 and ema_21 > 0:
+                if prev_ema_9 <= prev_ema_21 and ema_9 > ema_21:
+                    emas["crossover"] = "bullish_cross"  # 9 crossed above 21
+                elif prev_ema_9 >= prev_ema_21 and ema_9 < ema_21:
+                    emas["crossover"] = "bearish_cross"  # 9 crossed below 21
+
+        # RSI (14-period)
+        rsi = _compute_rsi(closes, 14)
+
+        # MACD (12/26/9)
+        macd = _compute_macd(closes, 12, 26, 9)
+
+        # ATR (14-period)
+        atr = _compute_atr(bars, 14)
+
+        # Market structure (swing highs/lows)
+        market_structure = _detect_market_structure(bars, min_swing_pts=3.0)
+
+        return emas, rsi, macd, atr, market_structure
 
     # ── Price Action Summary ─────────────────────────────────────────────────
 
@@ -696,6 +1012,12 @@ class StateEngine:
         self._regime_confidence = 0.5
         self._regime_classifier = RegimeClassifier(stability_window=3)
         self._recent_bars.clear()
+        self._1min_bars.clear()
+        self._current_1min_bar = None
+        self._1min_bar_start = None
+        self._opening_range_high = 0.0
+        self._opening_range_low = float("inf")
+        self._opening_range_set = False
         self._last_state = None
         self._update_count = 0
         self._error_count = 0
@@ -704,11 +1026,19 @@ class StateEngine:
     def reset_for_rth(self) -> None:
         """Reset tick processor for RTH session open.
 
-        Clears accumulated VWAP, delta, volume profile, etc. so that
+        Clears accumulated VWAP, delta, volume profile, 1-min bars,
+        opening range, and all technical indicators so that
         RTH session metrics start fresh and are not polluted by
-        overnight/pre-market data.  Prior day and overnight levels
-        are preserved.
+        overnight/pre-market data.  Prior day, overnight levels,
+        and pivot levels are preserved.
         """
         self._tick_processor.reset()
         self._recent_bars.clear()
+        # Clear 1-min bars and opening range for fresh RTH computation
+        self._1min_bars.clear()
+        self._current_1min_bar = None
+        self._1min_bar_start = None
+        self._opening_range_high = 0.0
+        self._opening_range_low = float("inf")
+        self._opening_range_set = False
         logger.info("state_engine.reset_for_rth")

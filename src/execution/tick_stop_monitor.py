@@ -54,9 +54,11 @@ class TickStopMonitor:
         self,
         flatten_fn: FlattenFn,
         target_symbol: str = "",
-        trail_distance: float = 12.0,
+        trail_distance: float = 8.0,
         trail_activation_points: float = 4.0,
-        min_stop_distance: float = 4.0,
+        min_stop_distance: float = 3.0,
+        tighten_at_profit: float = 12.0,
+        tightened_distance: float = 5.0,
     ) -> None:
         """Initialize the tick stop monitor.
 
@@ -73,8 +75,11 @@ class TickStopMonitor:
         self._flatten_fn = flatten_fn
         self._target_symbol = target_symbol.upper() if target_symbol else ""
         self._trail_distance = trail_distance
+        self._default_trail_distance = trail_distance
         self._trail_activation = trail_activation_points
         self._min_stop_distance = min_stop_distance
+        self._tighten_at_profit = tighten_at_profit
+        self._tightened_distance = tightened_distance
 
         # Position state
         self._active = False
@@ -105,6 +110,7 @@ class TickStopMonitor:
         stop_price: float,
         take_profit_price: float = 0.0,
         trail_distance: float = 0.0,
+        atr: float = 0.0,
     ) -> None:
         """Activate monitoring for a new position.
 
@@ -113,7 +119,8 @@ class TickStopMonitor:
             entry_price: Entry price of the position.
             stop_price: Initial stop-loss price.
             take_profit_price: Take-profit price (0 = no TP).
-            trail_distance: Override trail distance (0 = use default).
+            trail_distance: Override trail distance (0 = use default or ATR-based).
+            atr: Current ATR — if provided, trail distance = max(2*ATR, 5.0).
         """
         self._active = True
         self._side = side.lower()
@@ -128,6 +135,12 @@ class TickStopMonitor:
 
         if trail_distance > 0:
             self._trail_distance = trail_distance
+        elif atr > 0:
+            # ATR-based trail: 2x ATR, clamped between 5 and 12 points
+            self._trail_distance = round(max(5.0, min(12.0, atr * 2.0)), 1)
+            self._tightened_distance = round(max(3.0, min(8.0, atr * 1.2)), 1)
+        else:
+            self._trail_distance = self._default_trail_distance
 
         logger.info(
             "tick_stop_monitor.activated",
@@ -267,6 +280,9 @@ class TickStopMonitor:
 
         Trail activates once position has minimum profit. Then the stop
         follows price at trail_distance, only moving in our favor.
+
+        Dynamic tightening: once profit exceeds tighten_at_profit (default 12pts),
+        trail distance shrinks from 8 to 5 points to capture more profit.
         """
         if self._side == "long":
             # Track best (highest) price
@@ -284,9 +300,16 @@ class TickStopMonitor:
                     best_price=self._best_price,
                 )
 
+            # Dynamic tightening based on profit
+            best_profit = self._best_price - self._entry_price
+            if best_profit >= self._tighten_at_profit:
+                effective_trail = self._tightened_distance
+            else:
+                effective_trail = self._trail_distance
+
             # Update stop if trailing is active
             if self._trail_active:
-                ideal_stop = self._best_price - self._trail_distance
+                ideal_stop = self._best_price - effective_trail
                 # Stop only moves UP for longs (never moves backward)
                 if ideal_stop > self._stop_price:
                     self._stop_price = ideal_stop
@@ -307,9 +330,16 @@ class TickStopMonitor:
                     best_price=self._best_price,
                 )
 
+            # Dynamic tightening based on profit
+            best_profit = self._entry_price - self._best_price
+            if best_profit >= self._tighten_at_profit:
+                effective_trail = self._tightened_distance
+            else:
+                effective_trail = self._trail_distance
+
             # Update stop if trailing is active
             if self._trail_active:
-                ideal_stop = self._best_price + self._trail_distance
+                ideal_stop = self._best_price + effective_trail
                 # Stop only moves DOWN for shorts (never moves backward)
                 if ideal_stop < self._stop_price:
                     self._stop_price = ideal_stop

@@ -403,6 +403,8 @@ class Reasoner:
             # Clamp confidence
             confidence = max(0.0, min(1.0, confidence))
 
+            setup_type = tool_input.get("setup_type")
+
             return LLMAction(
                 action=action_type,
                 side=side,
@@ -411,6 +413,7 @@ class Reasoner:
                 new_stop_price=new_stop_price,
                 reasoning=reasoning,
                 confidence=confidence,
+                setup_type=setup_type,
                 model_used=model,
                 latency_ms=response.latency_ms,
             )

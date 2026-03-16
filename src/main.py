@@ -824,6 +824,7 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
             circuit_breakers=components.get("circuit_breakers"),
             apex_guardrail=components.get("apex_guardrail"),
             rth_reset_fn=state_engine.reset_for_rth,
+            session_stats_fn=state_engine.update_session_stats,
         )
 
         # Install signal handlers for graceful shutdown

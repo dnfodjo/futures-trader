@@ -206,6 +206,7 @@ class LLMAction(BaseModel):
     new_stop_price: Optional[float] = None  # absolute price for MOVE_STOP
     reasoning: str
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    setup_type: Optional[str] = None  # which setup pattern is being played
     model_used: str = "haiku"
     latency_ms: int = 0
 
@@ -259,8 +260,37 @@ class MarketState(BaseModel):
     # Price action summary (text for LLM context)
     price_action_summary: str = ""
 
-    # Recent 1-second OHLCV bars (for setup detection, not sent to LLM)
+    # Recent 1-second OHLCV bars (for setup detection, not sent to LLM directly)
     recent_bars: list[dict] = Field(default_factory=list, exclude=True)
+
+    # Recent 1-minute OHLCV bars — SENT to LLM so it can see candlestick structure
+    recent_1min_bars: list[dict] = Field(default_factory=list)
+
+    # ── Technical Indicators (computed by state engine) ──
+    # EMAs for trend identification
+    emas: dict = Field(default_factory=dict)  # {"ema_9": float, "ema_21": float, "ema_50": float}
+
+    # Market structure — swing highs/lows and trend pattern
+    market_structure: dict = Field(default_factory=dict)
+    # {"trend": "up/down/sideways", "last_swing_high": float, "last_swing_low": float,
+    #  "pattern": "HH_HL" / "LH_LL" / "mixed", "swing_count": int}
+
+    # ATR — Average True Range (14-period on 1-min bars)
+    atr: float = 0.0
+
+    # Opening range (9:30-9:45 high/low)
+    opening_range_high: float = 0.0
+    opening_range_low: float = 0.0
+
+    # Pivot levels from prior day
+    pivot_levels: dict = Field(default_factory=dict)
+    # {"pivot": float, "r1": float, "r2": float, "s1": float, "s2": float}
+
+    # RSI (14-period on 1-min bars, 0-100 scale)
+    rsi: float = 50.0
+
+    # MACD (12/26/9 on 1-min bars)
+    macd: dict = Field(default_factory=dict)  # {"macd": float, "signal": float, "histogram": float}
 
     # Recent trades for context
     recent_trades: list[TradeRecord] = Field(default_factory=list)
@@ -355,8 +385,39 @@ class MarketState(BaseModel):
                 computed["delta_strength"] = "light"
             computed["delta_direction"] = "buying" if delta > 0 else "selling"
 
+        # Suggested stop levels from market structure (helps LLM place logical stops)
+        if self.market_structure:
+            swing_low = self.market_structure.get("last_swing_low", 0)
+            swing_high = self.market_structure.get("last_swing_high", 0)
+            if swing_low > 0 and swing_high > 0:
+                computed["suggested_long_stop"] = round(swing_low - 2.0, 2)  # below swing low + buffer
+                computed["suggested_short_stop"] = round(swing_high + 2.0, 2)  # above swing high + buffer
+
         if computed:
             d["computed_signals"] = computed
+
+        # ── Technical Indicators ──
+        if self.emas:
+            d["emas"] = self.emas
+        if self.market_structure:
+            d["market_structure"] = self.market_structure
+        if self.atr > 0:
+            d["atr"] = round(self.atr, 2)
+        if self.opening_range_high > 0:
+            d["opening_range"] = {
+                "high": self.opening_range_high,
+                "low": self.opening_range_low,
+            }
+        if self.pivot_levels:
+            d["pivot_levels"] = self.pivot_levels
+        if self.rsi != 50.0:
+            d["rsi"] = round(self.rsi, 1)
+        if self.macd:
+            d["macd"] = self.macd
+
+        # Recent 1-min bars — last 10 bars so LLM can see candlestick structure
+        if self.recent_1min_bars:
+            d["recent_bars_1min"] = self.recent_1min_bars[-10:]
 
         # Only include cross-market if any values are non-zero
         cm = self.cross_market.model_dump()

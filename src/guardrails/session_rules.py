@@ -47,11 +47,13 @@ class SessionRuleGuardrail:
         daily_loss_limit: float = 400.0,
         blackout_minutes: int = 5,
         post_blackout_minutes: int = 10,
+        max_daily_trades: int = 6,
     ) -> None:
         self._max_consecutive_losers = max_consecutive_losers
         self._daily_loss_limit = daily_loss_limit
         self._blackout_minutes = blackout_minutes
         self._post_blackout_minutes = post_blackout_minutes
+        self._max_daily_trades = max_daily_trades
 
     def check(
         self,
@@ -89,6 +91,16 @@ class SessionRuleGuardrail:
                 reason=(
                     f"session_rule: {consecutive_losers} consecutive losers "
                     f"(max: {self._max_consecutive_losers})"
+                ),
+            )
+
+        # 2b. Max daily trades (hard cap to prevent overtrading)
+        if action.action == ActionType.ENTER and state.daily_trades >= self._max_daily_trades:
+            return GuardrailResult(
+                allowed=False,
+                reason=(
+                    f"session_rule: max daily trades reached "
+                    f"({state.daily_trades}/{self._max_daily_trades})"
                 ),
             )
 
