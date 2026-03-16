@@ -909,11 +909,53 @@ async def _load_prior_day_levels(
         if not prices:
             return
 
-        pdh = max(prices)
-        pdl = min(prices)
-        pdc = prices[-1]  # last trade = close
+        # Filter outliers using median-based approach.
+        # Some Databento historical records contain anomalous prices
+        # (settlement marks, corrections, etc.) that would corrupt PDH/PDL.
+        # Valid MNQ prices should be within 5% of the median session price.
+        sorted_prices = sorted(prices)
+        median_price = sorted_prices[len(sorted_prices) // 2]
+        tolerance = 0.05  # 5% from median
+        lower_bound = median_price * (1 - tolerance)
+        upper_bound = median_price * (1 + tolerance)
+        filtered_prices = [p for p in prices if lower_bound <= p <= upper_bound]
+
+        if not filtered_prices:
+            logger.warning(
+                "main.all_prices_filtered_as_outliers",
+                raw_count=len(prices),
+                median=median_price,
+            )
+            return
+
+        outlier_count = len(prices) - len(filtered_prices)
+        if outlier_count > 0:
+            logger.info(
+                "main.price_outliers_filtered",
+                outliers=outlier_count,
+                total=len(prices),
+                median=median_price,
+                bounds=f"{lower_bound:.2f}-{upper_bound:.2f}",
+            )
+
+        pdh = max(filtered_prices)
+        pdl = min(filtered_prices)
+        # Last valid trade = close (walk backwards through original to find
+        # the last trade that survived the outlier filter)
+        pdc = next(
+            (t["price"] for t in reversed(trades)
+             if t.get("price", 0) > 0 and lower_bound <= t["price"] <= upper_bound),
+            filtered_prices[-1],
+        )
 
         state_engine.set_prior_day_levels(high=pdh, low=pdl, close=pdc)
+        logger.info(
+            "main.prior_day_levels_computed",
+            pdh=pdh,
+            pdl=pdl,
+            pdc=pdc,
+            trade_count=len(filtered_prices),
+        )
 
         # Overnight levels: trades from 6PM ET yesterday to 9:30 AM ET today
         from datetime import datetime as dt
@@ -925,8 +967,9 @@ async def _load_prior_day_levels(
         on_prices = [
             t["price"] for t in trades
             if t.get("price", 0) > 0
+            and lower_bound <= t["price"] <= upper_bound  # apply same outlier filter
             and "timestamp" in t
-            and overnight_start.timestamp() <= t["timestamp"] <= rth_open.timestamp()
+            and overnight_start <= t["timestamp"] <= rth_open  # compare datetime to datetime
         ]
 
         if on_prices:
@@ -935,6 +978,7 @@ async def _load_prior_day_levels(
                 "main.overnight_levels_set",
                 onh=max(on_prices),
                 onl=min(on_prices),
+                trade_count=len(on_prices),
             )
 
     except Exception:
