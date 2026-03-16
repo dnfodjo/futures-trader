@@ -953,11 +953,14 @@ async def _load_prior_day_levels(
             root = re.sub(r"[FGHJKMNQUVXZ]\d+$", "", hist_symbol)
             hist_symbol = f"{root}.FUT" if root else hist_symbol
 
+        # Use end=tomorrow to ensure today's data is included
+        # (Databento historical API treats end as exclusive of that date)
+        tomorrow = today + timedelta(days=1)
         trades = await DatabentoClient.fetch_historical(
             api_key=config.databento.api_key,
             symbol=hist_symbol,
             start=yesterday.isoformat(),
-            end=today.isoformat(),
+            end=tomorrow.isoformat(),
         )
 
         if not trades:
@@ -1055,6 +1058,18 @@ async def _load_prior_day_levels(
                 and "timestamp" in t
                 and t["timestamp"] >= rth_start
             ]
+
+            # Debug: log trade timestamp range to understand data availability
+            all_timestamps = [t["timestamp"] for t in trades if "timestamp" in t]
+            if all_timestamps:
+                logger.info(
+                    "main.historical_timestamp_range",
+                    earliest=str(min(all_timestamps)),
+                    latest=str(max(all_timestamps)),
+                    rth_start=str(rth_start),
+                    rth_trades_found=len(rth_trades),
+                    total_trades=len(trades),
+                )
 
             if rth_trades:
                 # Aggregate into 1-min bars
