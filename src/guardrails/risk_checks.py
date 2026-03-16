@@ -30,7 +30,7 @@ class RiskCheckGuardrail:
         self,
         min_stop_distance: float = 3.0,
         max_stop_distance: float = 25.0,
-        min_confidence: float = 0.3,
+        min_confidence: float = 0.55,
         min_entry_spacing_pts: float = 5.0,
         max_spread_pts: float = 3.0,
     ) -> None:

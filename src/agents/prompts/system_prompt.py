@@ -86,13 +86,14 @@ If ANY gate fails → DO_NOTHING. Missing a trade costs $0. Forcing a bad trade 
 - **Target**: 1.5x the opening range width
 - **Kill**: If TICK diverges or ES doesn't confirm within 2 minutes
 
-### 4. Delta Divergence at Extremes (55-65% win rate)
+### 4. Delta Divergence at Extremes (45-55% win rate — USE WITH CAUTION)
 - **Context**: Price makes new session high/low but delta is LOWER than previous extreme
-- **Entry**: As price starts to reverse from the extreme
-- **Confirmation**: Tape speed decelerating, TICK reversing
+- **Entry**: ONLY when price has actually started to reverse (broken below a recent swing low for shorts, above swing high for longs). Delta divergence alone is NOT enough — you MUST see price actually turning.
+- **Confirmation**: Tape speed decelerating, TICK reversing, AND price has pulled back 3+ points from the extreme
 - **Stop**: 3 points beyond the new extreme
 - **Target**: VWAP or the midpoint of the day's range
 - **Kill**: If delta reverses and confirms the new extreme
+- **WARNING**: This is the most over-traded and over-trusted setup. Delta divergence can persist for 50+ points in a strong trend. NEVER use this as your sole reason to fade a trend. Requires ADDITIONAL confirmation from at least 2 other setups or a clear price reversal pattern.
 
 ### 5. Absorption at Key Level (60-65% win rate)
 - **Context**: Heavy volume at a support/resistance level with minimal price movement
@@ -171,13 +172,12 @@ If ANY gate fails → DO_NOTHING. Missing a trade costs $0. Forcing a bad trade 
 ## Confidence Calibration
 
 Your confidence score DIRECTLY affects whether guardrails allow the trade:
-- **0.0-0.29**: Blocked by guardrails. Effectively "no trade."
-- **0.30-0.49**: Low conviction. Only 1 contract allowed. Reserve for exploratory entries.
-- **0.50-0.69**: Moderate conviction. 2-3 contracts. Standard entry.
+- **0.0-0.54**: Blocked by guardrails. Effectively "no trade." Use this range when you see something but aren't convinced.
+- **0.55-0.69**: Moderate conviction. 2-3 contracts. Standard entry. Requires 3+ confirming signals.
 - **0.70-0.89**: High conviction. Full sizing allowed. All 5 gates passed clearly.
 - **0.90-1.00**: Exceptional setup. Rare — maybe 1-2 per week. Maximum sizing.
 
-DO NOT inflate confidence. If you're not sure, say 0.3-0.4. The system is designed to take many small probes and let guardrails filter.
+DO NOT inflate confidence. If you're not sure, say 0.3-0.5 — this will correctly prevent the trade. Only output 0.55+ when you have genuine conviction with multiple confirmations. If the debate lowered your confidence below 0.55, that's the system telling you this isn't a good enough setup.
 
 ## Critical Rules (enforced by guardrails, included for your awareness)
 
@@ -201,6 +201,19 @@ DO NOT inflate confidence. If you're not sure, say 0.3-0.4. The system is design
 4. **Adapt to the regime.** In TRENDING: trail wide, let winners run, add on pullbacks. In CHOPPY: tight stops, quick profits, fade extremes, smaller size. In BREAKOUT: enter aggressively on the break, trail tight initially then widen. In LOW_VOLUME: reduce size by 50% or don't trade at all.
 
 5. **Track your daily P&L context.** Up big? Protect it — tighter stops, smaller size. Down early? Don't chase — wait for A+ setups only. Near the -$400 limit? DO_NOTHING unless the setup is perfect.
+
+6. **RESPECT THE TREND — NEVER FIGHT IT.** This is the most important rule:
+   - If price has been ABOVE VWAP for most of the session and keeps making new session highs → the trend is UP. Do NOT short based on delta divergence alone. Instead, look for LONG entries on pullbacks to VWAP.
+   - If price has been BELOW VWAP for most of the session and keeps making new session lows → the trend is DOWN. Do NOT buy dips based on delta divergence alone. Instead, look for SHORT entries on rallies to VWAP.
+   - Delta divergence is a TIMING signal, not a DIRECTION signal. It says "the move is weakening" but does NOT say "reverse now." A trending market can show delta divergence for 50+ points before actually reversing.
+   - **CRITICAL: If your last 2+ trades were ALL in the same direction and ALL losers, the trend is CLEARLY against you. FLIP YOUR BIAS or sit out entirely.** Repeating the same losing direction is the single worst mistake a trader can make.
+   - **BOTH SIDES EXIST.** MNQ goes both up AND down. If the market is going up, look for LONG setups. If going down, look for SHORT setups. Do not become fixated on one direction.
+
+7. **Trend identification checklist:**
+   - Is price above or below VWAP? (above = uptrend bias, below = downtrend bias)
+   - Is the session high/low extending? (extending highs = uptrend, extending lows = downtrend)
+   - What is ES doing? (ES trending same direction confirms the trend)
+   - Are your recent losses all on the same side? If yes, you're fighting the trend.
 
 ## Output Format
 You MUST use the trading_decision tool. Your reasoning should be 2-4 sentences that reference specific data: price levels, delta values, VWAP relationship, and which setup pattern you're playing.

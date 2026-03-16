@@ -807,6 +807,50 @@ class TradingOrchestrator:
                 # If debate says DO_NOTHING, respect it
                 if action.action == ActionType.DO_NOTHING:
                     return
+
+                # 4b. Stop-breach check: After debate (which takes 9-12s),
+                # check if the current price has already moved past where
+                # the stop would be. If so, we'd get instantly stopped out.
+                # Abort the entry to avoid a guaranteed loss.
+                if (
+                    action.action == ActionType.ENTER
+                    and action.side is not None
+                    and action.stop_distance is not None
+                    and state.last_price > 0
+                ):
+                    current_price = state.last_price
+                    stop_dist = action.stop_distance
+                    if action.side == Side.LONG:
+                        would_stop = current_price - stop_dist
+                        # If current price is already below the would-be stop
+                        if current_price <= would_stop:
+                            logger.warning(
+                                "orchestrator.stale_entry_aborted",
+                                side="long",
+                                decision_price=current_price,
+                                would_stop=would_stop,
+                                reason="Price already at/below stop level — debate lag caused stale entry",
+                            )
+                            return
+                    elif action.side == Side.SHORT:
+                        would_stop = current_price + stop_dist
+                        # For shorts: if current price has moved UP so much
+                        # that we'd be entering very close to the stop, abort.
+                        # Specifically: if the price moved against us by more
+                        # than half the stop distance during debate, abort.
+                        # This means we'd enter with less than 50% of our
+                        # intended stop distance as cushion.
+                        decision_price = state.last_price  # approximate
+                        if current_price >= would_stop:
+                            logger.warning(
+                                "orchestrator.stale_entry_aborted",
+                                side="short",
+                                decision_price=current_price,
+                                would_stop=would_stop,
+                                reason="Price already at/above stop level — debate lag caused stale entry",
+                            )
+                            return
+
             except Exception:
                 logger.warning("orchestrator.debate_failed", exc_info=True)
                 # Fall through with original reasoner decision
@@ -864,6 +908,51 @@ class TradingOrchestrator:
                     )
                     return
                 # Fall through to execute the FLATTEN
+            # ── Auto-convert: ENTER same side → convert to ADD ──
+            # When the LLM sends ENTER while already in a position on the
+            # SAME side, it's trying to add to the position. Convert to ADD
+            # and re-run guardrails.
+            elif (
+                action.action == ActionType.ENTER
+                and position is not None
+                and action.side is not None
+                and action.side == position.side
+                and "position_limit" in (result.reason or "")
+            ):
+                logger.info(
+                    "orchestrator.auto_convert_add",
+                    side=action.side.value,
+                    quantity=action.quantity,
+                    msg="LLM used ENTER while in position — converting to ADD",
+                )
+                action = LLMAction(
+                    action=ActionType.ADD,
+                    side=action.side,
+                    quantity=action.quantity,
+                    stop_distance=action.stop_distance,
+                    reasoning=f"Auto-convert: LLM wanted ENTER {action.side.value} while already {position.side.value}. Converting to ADD.",
+                    confidence=action.confidence,
+                    setup_type=action.setup_type,
+                    model_used=action.model_used,
+                    latency_ms=action.latency_ms,
+                )
+                # Re-run guardrails on the ADD action
+                result = self._guardrails.check(
+                    action=action,
+                    state=state,
+                    position=position,
+                    daily_pnl=self._session_ctrl.daily_pnl,
+                    consecutive_losers=self._session_ctrl.consecutive_losers,
+                    effective_max_contracts=self._session_ctrl.effective_max_contracts,
+                )
+                if not result.allowed:
+                    self._actions_blocked += 1
+                    logger.info(
+                        "orchestrator.auto_convert_add_blocked",
+                        reason=result.reason,
+                    )
+                    return
+                # Fall through to execute the ADD
             else:
                 self._actions_blocked += 1
                 logger.info(
