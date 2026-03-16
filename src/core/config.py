@@ -95,11 +95,22 @@ class TradingConfig(BaseSettings):
     max_monthly_loss: float = 2000.0
     max_stop_points: float = 25.0
 
-    # Trading hours (all ET)
-    trading_start: str = "09:35"
-    trading_end: str = "15:50"
-    hard_flatten_time: str = "15:55"
-    pre_market_analysis_time: str = "09:25"
+    # Trading hours (all ET) — full Globex session
+    # 18:05 start = 5 min after Asian session opens (skip thin open)
+    # 16:50 end = 10 min before daily halt (flatten buffer)
+    # Daily halt 17:00-18:00 is always blocked by clock.is_trading_hours()
+    trading_start: str = "18:05"
+    trading_end: str = "16:50"
+    hard_flatten_time: str = "16:55"
+    pre_market_analysis_time: str = "17:55"  # 5 min before Globex opens
+
+    # Max contracts during ETH (overnight) — reduced for thin liquidity
+    max_contracts_eth: int = 2
+
+    # Max trades per 23h session (18:05→16:55)
+    # Old RTH-only was 6 across 6.5h. With 23h, ~12 is proportional
+    # but still conservative enough to prevent overtrading.
+    max_daily_trades: int = 12
 
     # News blackout
     news_blackout_before_min: int = 5
@@ -127,6 +138,7 @@ class TradingConfig(BaseSettings):
     state_update_interval_no_position_sec: float = 30.0
     state_update_interval_in_position_sec: float = 10.0
     state_update_interval_critical_sec: float = 5.0
+    state_update_interval_eth_no_position_sec: float = 45.0  # slower scan during ETH
 
     # Trail manager
     trail_min_move_points: float = 3.0  # only modify stop after 3pt move

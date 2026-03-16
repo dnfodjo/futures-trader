@@ -360,6 +360,8 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         max_contracts=trading.max_contracts,
         max_stop_distance=trading.max_stop_points,
         blackout_minutes=trading.news_blackout_before_min,
+        max_daily_trades=trading.max_daily_trades,
+        max_contracts_eth=trading.max_contracts_eth,
     )
 
     # ── Notifications ───────────────────────────────────────────────────────

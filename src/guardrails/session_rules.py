@@ -1,11 +1,11 @@
 """Session rule guardrails — time-based and session state restrictions.
 
 Checks:
+- No new entries during daily halt (17:00-18:00 ET CME maintenance)
 - No new entries during economic news blackout periods
-- No entries during close or after-hours session phases
 - Daily loss limit not yet hit (redundant with SessionController but defense-in-depth)
 - Consecutive loser streak not exceeded
-- Midday size reduction (half contracts during low-volume period)
+- Reduced size during low-liquidity sessions (midday, Asian, post-RTH)
 - Post-loss cooling: require higher confidence after consecutive losses
 """
 
@@ -37,8 +37,14 @@ class SessionRuleGuardrail:
 
     # Phases where new entries are blocked
     BLOCKED_PHASES = frozenset({
-        SessionPhase.CLOSE,
-        SessionPhase.AFTER_HOURS,
+        SessionPhase.DAILY_HALT,
+    })
+
+    # Phases where position size is reduced (thin liquidity)
+    REDUCED_SIZE_PHASES = frozenset({
+        SessionPhase.MIDDAY,
+        SessionPhase.ASIAN,
+        SessionPhase.POST_RTH,
     })
 
     def __init__(
@@ -48,12 +54,14 @@ class SessionRuleGuardrail:
         blackout_minutes: int = 5,
         post_blackout_minutes: int = 10,
         max_daily_trades: int = 6,
+        max_contracts_eth: int = 2,
     ) -> None:
         self._max_consecutive_losers = max_consecutive_losers
         self._daily_loss_limit = daily_loss_limit
         self._blackout_minutes = blackout_minutes
         self._post_blackout_minutes = post_blackout_minutes
         self._max_daily_trades = max_daily_trades
+        self._max_contracts_eth = max_contracts_eth
 
     def check(
         self,
@@ -128,17 +136,37 @@ class SessionRuleGuardrail:
                 ),
             )
 
-        # 6. Midday size reduction — cap quantity at half during low-volume period
+        # 6. ETH max contracts cap — hard limit during extended hours
         if (
             action.action == ActionType.ENTER
             and hasattr(state, "session_phase")
-            and state.session_phase == SessionPhase.MIDDAY
+            and state.session_phase in self._ETH_PHASES
+            and action.quantity is not None
+            and action.quantity > self._max_contracts_eth
+        ):
+            logger.info(
+                "session_rule.eth_size_cap",
+                phase=state.session_phase.value,
+                original=action.quantity,
+                capped=self._max_contracts_eth,
+            )
+            return GuardrailResult(
+                allowed=True,
+                modified_quantity=self._max_contracts_eth,
+            )
+
+        # 7. Additional size reduction for thinnest sessions (midday, Asian, post-RTH)
+        if (
+            action.action == ActionType.ENTER
+            and hasattr(state, "session_phase")
+            and state.session_phase in self.REDUCED_SIZE_PHASES
             and action.quantity is not None
             and action.quantity > 2
         ):
             reduced = max(1, action.quantity // 2)
             logger.info(
-                "session_rule.midday_size_reduction",
+                "session_rule.thin_liquidity_size_reduction",
+                phase=state.session_phase.value,
                 original=action.quantity,
                 reduced=reduced,
             )
@@ -148,6 +176,14 @@ class SessionRuleGuardrail:
             )
 
         return GuardrailResult(allowed=True)
+
+    # All extended trading hours phases
+    _ETH_PHASES = frozenset({
+        SessionPhase.ASIAN,
+        SessionPhase.LONDON,
+        SessionPhase.PRE_RTH,
+        SessionPhase.POST_RTH,
+    })
 
     def _in_blackout(self, state: MarketState) -> bool:
         """Check if we're within a news blackout window.

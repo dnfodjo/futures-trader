@@ -154,7 +154,7 @@ class TestBlocked:
     def test_blocked_by_session_rule(self, engine):
         result = engine.check(
             _action(ActionType.ENTER),
-            _state(session_phase=SessionPhase.CLOSE),
+            _state(session_phase=SessionPhase.DAILY_HALT),
         )
         assert result.allowed is False
         assert "session_rule" in result.reason

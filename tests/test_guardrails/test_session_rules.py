@@ -110,17 +110,37 @@ class TestSessionPhase:
         result = guard.check(_action(ActionType.ENTER), state)
         assert result.allowed is True
 
-    def test_blocks_during_close(self, guard):
+    def test_allows_during_close(self, guard):
+        """Close phase is no longer blocked — we trade all sessions now."""
         state = _state(session_phase=SessionPhase.CLOSE)
         result = guard.check(_action(ActionType.ENTER), state)
-        assert result.allowed is False
-        assert "close" in result.reason
+        assert result.allowed is True
 
-    def test_blocks_during_after_hours(self, guard):
-        state = _state(session_phase=SessionPhase.AFTER_HOURS)
+    def test_blocks_during_daily_halt(self, guard):
+        state = _state(session_phase=SessionPhase.DAILY_HALT)
         result = guard.check(_action(ActionType.ENTER), state)
         assert result.allowed is False
-        assert "after_hours" in result.reason
+        assert "daily_halt" in result.reason
+
+    def test_allows_asian_session(self, guard):
+        state = _state(session_phase=SessionPhase.ASIAN)
+        result = guard.check(_action(ActionType.ENTER), state)
+        assert result.allowed is True
+
+    def test_allows_london_session(self, guard):
+        state = _state(session_phase=SessionPhase.LONDON)
+        result = guard.check(_action(ActionType.ENTER), state)
+        assert result.allowed is True
+
+    def test_allows_pre_rth(self, guard):
+        state = _state(session_phase=SessionPhase.PRE_RTH)
+        result = guard.check(_action(ActionType.ENTER), state)
+        assert result.allowed is True
+
+    def test_allows_post_rth(self, guard):
+        state = _state(session_phase=SessionPhase.POST_RTH)
+        result = guard.check(_action(ActionType.ENTER), state)
+        assert result.allowed is True
 
     def test_allows_afternoon(self, guard):
         state = _state(session_phase=SessionPhase.AFTERNOON)

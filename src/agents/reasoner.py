@@ -325,18 +325,17 @@ class Reasoner:
           low-activity periods when flat.
 
         Approximate cost: Sonnet ~$0.003/call, Haiku ~$0.0003/call (with caching).
-        At 30s intervals, that's ~$3.50/day all-Sonnet vs ~$0.35/day all-Haiku.
-        The blended approach targets ~$1-2/day.
+        At 30s intervals over 23 hours: blended approach targets ~$3-5/day.
         """
         # Always Sonnet when in a position (managing risk is high-stakes)
         if state.position is not None:
             return "sonnet"
 
-        # Sonnet during high-activity phases (entries are most likely)
+        # Sonnet during high-activity RTH phases (entries are most likely)
         if state.session_phase.value in ("open_drive", "close"):
             return "sonnet"
 
-        # Sonnet during morning session (best trading window — most setups)
+        # Sonnet during morning session (best RTH trading window)
         if state.session_phase.value == "morning":
             return "sonnet"
 
@@ -344,20 +343,29 @@ class Reasoner:
         if state.session_phase.value == "afternoon":
             return "sonnet"
 
+        # Sonnet during London session (cleanest trends of the day)
+        if state.session_phase.value == "london":
+            return "sonnet"
+
+        # Sonnet during pre-RTH (econ data drops at 8:30)
+        if state.session_phase.value == "pre_rth":
+            return "sonnet"
+
         # Sonnet in blackout (need careful "do nothing" decision)
         if state.in_blackout:
             return "sonnet"
 
         # Sonnet when at a decision point (near a key level)
-        # The to_llm_dict computed signals flag this
         if state.last_price > 0:
             level_data = state.levels.model_dump()
             for val in level_data.values():
                 if val > 0 and abs(state.last_price - val) <= 5.0:
                     return "sonnet"
 
-        # Haiku only during midday when flat and away from levels
-        # (low-probability period — save costs)
+        # Haiku for low-probability scan periods when flat and away from levels:
+        # - Asian session (thin, mostly drift)
+        # - Midday chop zone
+        # - Post-RTH (thin, unwinding)
         return "haiku"
 
     # ── Response Parsing ─────────────────────────────────────────────────────

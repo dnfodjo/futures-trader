@@ -41,13 +41,25 @@ class Regime(str, Enum):
 
 
 class SessionPhase(str, Enum):
-    PRE_MARKET = "pre_market"
-    OPEN_DRIVE = "open_drive"  # 9:30-10:00
+    # Overnight / Globex sessions
+    ASIAN = "asian"  # 18:00-02:00 ET (prev day 6 PM → 2 AM)
+    LONDON = "london"  # 02:00-08:00 ET
+    PRE_RTH = "pre_rth"  # 08:00-09:30 ET (econ data drops at 8:30)
+
+    # Regular Trading Hours (RTH)
+    OPEN_DRIVE = "open_drive"  # 09:30-10:00
     MORNING = "morning"  # 10:00-12:00
     MIDDAY = "midday"  # 12:00-14:00
     AFTERNOON = "afternoon"  # 14:00-15:30
     CLOSE = "close"  # 15:30-16:00
-    AFTER_HOURS = "after_hours"
+
+    # Post-RTH
+    POST_RTH = "post_rth"  # 16:00-16:55 ET
+    DAILY_HALT = "daily_halt"  # 17:00-18:00 ET (CME maintenance)
+
+    # Legacy aliases kept for backward compatibility in stored data
+    PRE_MARKET = "pre_market"  # maps to PRE_RTH conceptually
+    AFTER_HOURS = "after_hours"  # maps to POST_RTH conceptually
 
 
 class SystemState(str, Enum):

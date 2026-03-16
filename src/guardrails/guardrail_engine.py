@@ -61,6 +61,8 @@ class GuardrailEngine:
         max_consecutive_losers: int = 4,
         daily_loss_limit: float = 400.0,
         blackout_minutes: int = 5,
+        max_daily_trades: int = 12,
+        max_contracts_eth: int = 2,
     ) -> None:
         self._bus = event_bus
 
@@ -72,6 +74,8 @@ class GuardrailEngine:
             max_consecutive_losers=max_consecutive_losers,
             daily_loss_limit=daily_loss_limit,
             blackout_minutes=blackout_minutes,
+            max_daily_trades=max_daily_trades,
+            max_contracts_eth=max_contracts_eth,
         )
         self._risk_checks = RiskCheckGuardrail(
             min_stop_distance=min_stop_distance,

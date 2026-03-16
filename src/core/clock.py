@@ -83,7 +83,20 @@ def to_et(dt: datetime) -> datetime:
 
 
 def get_session_phase(t: datetime | None = None) -> SessionPhase:
-    """Determine the current session phase based on time of day (ET)."""
+    """Determine the current session phase based on time of day (ET).
+
+    CME Globex MNQ sessions (all times ET):
+        18:00 - 02:00  Asian session (Sunday open at 18:00)
+        02:00 - 08:00  London session
+        08:00 - 09:30  Pre-RTH (econ data at 8:30)
+        09:30 - 10:00  Open drive
+        10:00 - 12:00  Morning
+        12:00 - 14:00  Midday
+        14:00 - 15:30  Afternoon
+        15:30 - 16:00  Close
+        16:00 - 16:55  Post-RTH
+        17:00 - 18:00  Daily halt (CME maintenance)
+    """
     if t is None:
         t = now_et()
     else:
@@ -91,25 +104,71 @@ def get_session_phase(t: datetime | None = None) -> SessionPhase:
 
     current = t.time()
 
-    if current < time(9, 30):
-        return SessionPhase.PRE_MARKET
-    if current < time(10, 0):
+    # RTH phases (most common path — checked first)
+    if time(9, 30) <= current < time(10, 0):
         return SessionPhase.OPEN_DRIVE
-    if current < time(12, 0):
+    if time(10, 0) <= current < time(12, 0):
         return SessionPhase.MORNING
-    if current < time(14, 0):
+    if time(12, 0) <= current < time(14, 0):
         return SessionPhase.MIDDAY
-    if current < time(15, 30):
+    if time(14, 0) <= current < time(15, 30):
         return SessionPhase.AFTERNOON
-    if current < time(16, 0):
+    if time(15, 30) <= current < time(16, 0):
         return SessionPhase.CLOSE
-    return SessionPhase.AFTER_HOURS
+
+    # Post-RTH and daily halt
+    if time(16, 0) <= current < time(17, 0):
+        return SessionPhase.POST_RTH
+    if time(17, 0) <= current < time(18, 0):
+        return SessionPhase.DAILY_HALT
+
+    # Overnight sessions (wraps past midnight)
+    if current >= time(18, 0):
+        return SessionPhase.ASIAN
+    if current < time(2, 0):
+        return SessionPhase.ASIAN
+    if time(2, 0) <= current < time(8, 0):
+        return SessionPhase.LONDON
+    if time(8, 0) <= current < time(9, 30):
+        return SessionPhase.PRE_RTH
+
+    # Should never reach here, but defensive
+    return SessionPhase.DAILY_HALT
 
 
-def is_trading_hours(start: str = "09:35", end: str = "15:50", t: datetime | None = None) -> bool:
+def is_rth(phase: SessionPhase) -> bool:
+    """Check if a session phase is Regular Trading Hours."""
+    return phase in _RTH_PHASES
+
+
+def is_eth(phase: SessionPhase) -> bool:
+    """Check if a session phase is Extended Trading Hours (overnight/pre/post)."""
+    return phase in _ETH_PHASES
+
+
+# Phase sets for quick membership checks
+_RTH_PHASES = frozenset({
+    SessionPhase.OPEN_DRIVE,
+    SessionPhase.MORNING,
+    SessionPhase.MIDDAY,
+    SessionPhase.AFTERNOON,
+    SessionPhase.CLOSE,
+})
+
+_ETH_PHASES = frozenset({
+    SessionPhase.ASIAN,
+    SessionPhase.LONDON,
+    SessionPhase.PRE_RTH,
+    SessionPhase.POST_RTH,
+})
+
+
+def is_trading_hours(start: str = "18:05", end: str = "16:50", t: datetime | None = None) -> bool:
     """Check if current time is within allowed trading hours.
 
+    Supports cross-midnight windows (e.g. start=18:05, end=16:50 wraps overnight).
     On early close dates, trading ends at 12:50 regardless of the `end` parameter.
+    Always excludes the daily halt (17:00-18:00 ET).
     """
     if t is None:
         t = now_et()
@@ -123,16 +182,38 @@ def is_trading_hours(start: str = "09:35", end: str = "15:50", t: datetime | Non
     # On early close days, cap the trading window at 12:50 ET
     if is_early_close(t):
         early_end = time(12, 50)
-        if end_time > early_end:
-            end_time = early_end
+        # Daily halt is still blocked
+        if time(17, 0) <= current < time(18, 0):
+            return False
+        # Cross-midnight: session started prev evening, ends at 12:50 on early day
+        if start_time > early_end:
+            return current >= start_time or current <= early_end
+        return start_time <= current <= early_end
 
+    # Always block during daily halt (17:00-18:00 ET)
+    if time(17, 0) <= current < time(18, 0):
+        return False
+
+    # Cross-midnight window: start > end means the window wraps past midnight
+    # e.g. start=18:05, end=16:50 → active from 18:05 to midnight AND midnight to 16:50
+    if start_time > end_time:
+        return current >= start_time or current <= end_time
+
+    # Normal non-wrapping window
     return start_time <= current <= end_time
 
 
-def is_past_hard_flatten(flatten_time: str = "15:55", t: datetime | None = None) -> bool:
-    """Check if we're past the hard flatten time.
+def is_past_hard_flatten(flatten_time: str = "16:55", t: datetime | None = None) -> bool:
+    """Check if we must flatten before the daily halt.
+
+    The CME daily halt is 17:00-18:00 ET. We flatten at 16:55 to avoid
+    being caught in the halt with an open position.
 
     On early close dates, hard flatten is at 12:55 PM ET.
+
+    This function returns True ONLY in the narrow pre-halt window
+    (flatten_time to 17:00). After 18:00, a new session begins and
+    we should NOT be flattening.
     """
     if t is None:
         t = now_et()
@@ -144,24 +225,49 @@ def is_past_hard_flatten(flatten_time: str = "15:55", t: datetime | None = None)
     # On early close days, override flatten time
     if is_early_close(t):
         flat_time = time(12, 55)
-    else:
-        flat_time = time(*[int(x) for x in flatten_time.split(":")])
+        return flat_time <= current < time(13, 5)
 
-    return current >= flat_time
+    flat_time = time(*[int(x) for x in flatten_time.split(":")])
+
+    # Only flatten in the narrow pre-halt window, not for the entire night
+    return flat_time <= current < time(17, 0)
 
 
 def is_market_day(t: datetime | None = None) -> bool:
-    """Check if today is a trading day (weekday and not a known holiday)."""
+    """Check if Globex is open at the given time.
+
+    CME Globex runs Sunday 18:00 ET through Friday 17:00 ET.
+    Closed all day Saturday and Sunday before 18:00.
+    Also closed on market holidays (checked against next business day
+    for overnight sessions).
+    """
     if t is None:
         t = now_et()
+    else:
+        t = to_et(t)
 
-    # Weekend check
-    if t.weekday() >= 5:
+    weekday = t.weekday()  # 0=Mon ... 6=Sun
+
+    # Saturday: always closed
+    if weekday == 6 and t.time() < time(18, 0):
+        # Sunday before 18:00 → closed
+        return False
+    if weekday == 5:
+        # Saturday: always closed (Globex closes Friday 17:00)
         return False
 
-    # Holiday check
-    holidays = _get_holidays(t.year)
-    if t.date() in holidays:
+    # Friday after 17:00: Globex is closed for the weekend
+    if weekday == 4 and t.time() >= time(17, 0):
+        return False
+
+    # Holiday check: for overnight sessions (18:00+), check the NEXT day's
+    # holiday status since that's the trading session it belongs to
+    check_date = t.date()
+    if t.time() >= time(18, 0):
+        check_date = (t + timedelta(days=1)).date()
+
+    holidays = _get_holidays(check_date.year)
+    if check_date in holidays:
         return False
 
     return True
@@ -236,33 +342,40 @@ def format_time_in_session(t: datetime | None = None) -> str:
     else:
         t = to_et(t)
 
-    market_open = t.replace(hour=9, minute=30, second=0, microsecond=0)
-    if t < market_open:
-        return "pre-market"
-
-    minutes_in = int((t - market_open).total_seconds() / 60)
-    return f"{t.strftime('%I:%M %p')} ET, {minutes_in} min into session"
+    phase = get_session_phase(t)
+    return f"{t.strftime('%I:%M %p')} ET ({phase.value} session)"
 
 
 def get_effective_close_time(t: datetime | None = None) -> str:
-    """Get the effective close time for today.
+    """Get the effective session close time for today.
 
-    Returns "13:00" on early close days, "16:00" on normal days.
+    Returns "13:00" on early close days, "17:00" on normal days
+    (CME daily halt begins at 17:00 ET).
     """
     if t is None:
         t = now_et()
     if is_early_close(t):
         return "13:00"
-    return "16:00"
+    return "17:00"
 
 
 def get_effective_flatten_time(t: datetime | None = None) -> str:
     """Get the effective hard flatten time for today.
 
-    Returns "12:55" on early close days, "15:55" on normal days.
+    Returns "12:55" on early close days, "16:55" on normal days
+    (flatten 5 min before the daily halt).
     """
     if t is None:
         t = now_et()
     if is_early_close(t):
         return "12:55"
-    return "15:55"
+    return "16:55"
+
+
+def is_daily_halt(t: datetime | None = None) -> bool:
+    """Check if we're in the CME daily maintenance halt (17:00-18:00 ET)."""
+    if t is None:
+        t = now_et()
+    else:
+        t = to_et(t)
+    return time(17, 0) <= t.time() < time(18, 0)

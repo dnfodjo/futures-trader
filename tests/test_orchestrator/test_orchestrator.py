@@ -356,8 +356,8 @@ class TestTradingLoopControl:
     @pytest.mark.asyncio
     @patch("src.orchestrator.clock")
     async def test_past_trading_end_breaks_loop(self, mock_clock, orchestrator):
-        """Past trading end time should exit the loop."""
-        mock_clock.seconds_until.return_value = -60  # 60 sec past trading end
+        """Outside trading hours should exit the loop."""
+        mock_clock.is_trading_hours.return_value = False  # outside trading window
         mock_clock.is_past_hard_flatten.return_value = False
 
         await orchestrator._trading_loop()
@@ -542,11 +542,23 @@ class TestStartStop:
 
 
 class TestCycleInterval:
-    def test_interval_when_flat(self, orchestrator, mock_position_tracker):
-        """Flat position should use the slower interval."""
+    @patch("src.orchestrator.clock")
+    def test_interval_when_flat_rth(self, mock_clock, orchestrator, mock_position_tracker):
+        """Flat position during RTH should use the 30s interval."""
+        mock_clock.get_session_phase.return_value = SessionPhase.MORNING
+        mock_clock.is_eth.return_value = False
         mock_position_tracker.position = None
         interval = orchestrator._get_cycle_interval()
         assert interval == 30.0  # state_update_interval_no_position_sec
+
+    @patch("src.orchestrator.clock")
+    def test_interval_when_flat_eth(self, mock_clock, orchestrator, mock_position_tracker):
+        """Flat position during ETH should use the slower 45s interval."""
+        mock_clock.get_session_phase.return_value = SessionPhase.ASIAN
+        mock_clock.is_eth.return_value = True
+        mock_position_tracker.position = None
+        interval = orchestrator._get_cycle_interval()
+        assert interval == 45.0  # state_update_interval_eth_no_position_sec
 
     def test_interval_when_in_position(self, orchestrator, mock_position_tracker):
         """In-position should use the faster interval."""

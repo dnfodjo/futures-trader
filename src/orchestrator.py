@@ -408,14 +408,14 @@ class TradingOrchestrator:
         """The core trading loop — runs until shutdown signal or market close."""
 
         while not self._shutdown_event.is_set():
-            # Check if we're past trading hours
-            if self._is_past_trading_end():
-                logger.info("orchestrator.trading_hours_ended")
+            # Check hard flatten time FIRST — must flatten before halt
+            if self._is_past_hard_flatten():
+                await self._hard_flatten("Past hard flatten time — daily halt approaching")
                 break
 
-            # Check hard flatten time
-            if self._is_past_hard_flatten():
-                await self._hard_flatten("Past hard flatten time")
+            # Check if we're outside the trading window
+            if self._is_past_trading_end():
+                logger.info("orchestrator.trading_hours_ended")
                 break
 
             # Check kill switch
@@ -1414,8 +1414,9 @@ class TradingOrchestrator:
     def _get_cycle_interval(self) -> float:
         """Determine how long to sleep between decision cycles.
 
-        Three tiers:
-        - Flat: 30s (no urgency)
+        Four tiers:
+        - Flat, ETH: 45s (thin liquidity, save API costs)
+        - Flat, RTH: 30s (no urgency)
         - In position: 10s (need to monitor)
         - Critical: 5s (near stop, high adverse excursion, or high volatility)
         """
@@ -1423,6 +1424,10 @@ class TradingOrchestrator:
         trading = self._config.trading
 
         if position is None:
+            # Slower cycle during extended hours when flat
+            phase = clock.get_session_phase()
+            if clock.is_eth(phase):
+                return trading.state_update_interval_eth_no_position_sec
             return trading.state_update_interval_no_position_sec
 
         # Check for critical conditions
@@ -1469,9 +1474,15 @@ class TradingOrchestrator:
         )
 
     def _is_past_trading_end(self) -> bool:
-        """Check if we're past the end of trading hours."""
-        sec = clock.seconds_until(self._trading_end)
-        return sec <= 0
+        """Check if we're outside the trading window.
+
+        With cross-midnight sessions (18:05 → 16:50), we can't simply check
+        if we're past a target time. Instead, invert the trading hours check.
+        """
+        return not clock.is_trading_hours(
+            start=self._trading_start,
+            end=self._trading_end,
+        )
 
     def _is_past_hard_flatten(self) -> bool:
         """Check if we're past the hard flatten time."""

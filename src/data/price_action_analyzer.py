@@ -388,9 +388,20 @@ class PriceActionAnalyzer:
         phase = state.session_phase
 
         phase_descriptions = {
-            SessionPhase.PRE_MARKET: (
-                "Pre-market session. Monitoring overnight developments "
-                "and preparing for the open."
+            SessionPhase.ASIAN: (
+                "Asian session (Globex overnight). Thin liquidity, slow grind. "
+                "Give stops extra room to avoid stop hunts. Macro news from "
+                "Japan/China can create sharp moves. Favor trend-following."
+            ),
+            SessionPhase.LONDON: (
+                "London session. Often the cleanest trends of the day — "
+                "FX and bond flows drive directional moves. Good for "
+                "trend-following entries with wider targets."
+            ),
+            SessionPhase.PRE_RTH: (
+                "Pre-RTH session. Economic data drops at 8:30 AM ET "
+                "(CPI, PPI, jobs). Big moves on data, then settling. "
+                "Wait for reaction to stabilize before entering."
             ),
             SessionPhase.OPEN_DRIVE: (
                 "Open drive phase (first 30 min). High volatility expected, "
@@ -412,8 +423,12 @@ class PriceActionAnalyzer:
                 "Closing session. End of day squaring and potential "
                 "last-minute directional moves."
             ),
-            SessionPhase.AFTER_HOURS: (
-                "After hours session. Thin liquidity, limited participation."
+            SessionPhase.POST_RTH: (
+                "Post-RTH session. Thin liquidity, mostly position "
+                "unwinding. Reduced size, tight stops."
+            ),
+            SessionPhase.DAILY_HALT: (
+                "CME daily maintenance halt. No trading allowed."
             ),
         }
 
