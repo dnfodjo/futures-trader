@@ -108,9 +108,9 @@ class TradingConfig(BaseSettings):
     max_contracts_eth: int = 2
 
     # Max trades per 23h session (18:05→16:55)
-    # Old RTH-only was 6 across 6.5h. With 23h, ~12 is proportional
-    # but still conservative enough to prevent overtrading.
-    max_daily_trades: int = 12
+    # With all sessions (Asian, London, Pre-RTH, RTH, Post-RTH),
+    # the system can easily take 20+ trades across 23 hours.
+    max_daily_trades: int = 24
 
     # News blackout
     news_blackout_before_min: int = 5
