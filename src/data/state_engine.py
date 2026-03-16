@@ -778,6 +778,7 @@ class StateEngine:
             emas["ema_50"] = ema_50
 
         # EMA alignment for trend confirmation
+        # Compute with whatever EMAs are available (graceful degradation)
         if ema_9 > 0 and ema_21 > 0 and ema_50 > 0:
             if ema_9 > ema_21 > ema_50:
                 emas["alignment"] = "bullish"
@@ -785,6 +786,14 @@ class StateEngine:
                 emas["alignment"] = "bearish"
             else:
                 emas["alignment"] = "mixed"
+        elif ema_9 > 0 and ema_21 > 0:
+            # Partial alignment from 9/21 only (EMA 50 not yet available)
+            if ema_9 > ema_21:
+                emas["alignment"] = "bullish_partial"
+            elif ema_9 < ema_21:
+                emas["alignment"] = "bearish_partial"
+            else:
+                emas["alignment"] = "mixed_partial"
 
         # EMA crossover detection (using prior bar's EMAs)
         if len(closes) > 21:
@@ -1042,3 +1051,34 @@ class StateEngine:
         self._opening_range_low = float("inf")
         self._opening_range_set = False
         logger.info("state_engine.reset_for_rth")
+
+    def warm_1min_bars(self, bars: list[dict]) -> None:
+        """Pre-populate 1-min bars from historical data for instant indicator warmup.
+
+        Call AFTER reset_for_rth() to avoid bars being cleared.
+        Each bar dict must have: timestamp, open, high, low, close, volume.
+        """
+        if not bars:
+            return
+        self._1min_bars = bars[-120:]  # keep max 120 bars (2 hours)
+        # Set the current bar start to the last bar's timestamp so new bars
+        # continue from where historical left off
+        last_bar = self._1min_bars[-1]
+        if "timestamp" in last_bar:
+            from datetime import datetime as dt
+
+            ts = last_bar["timestamp"]
+            if isinstance(ts, str):
+                try:
+                    self._1min_bar_start = dt.fromisoformat(ts)
+                except (ValueError, TypeError):
+                    self._1min_bar_start = None
+            elif isinstance(ts, dt):
+                self._1min_bar_start = ts
+        self._current_1min_bar = None  # force new bar on next tick
+        logger.info(
+            "state_engine.warm_1min_bars",
+            bar_count=len(self._1min_bars),
+            first_ts=self._1min_bars[0].get("timestamp", "?") if self._1min_bars else "?",
+            last_ts=self._1min_bars[-1].get("timestamp", "?") if self._1min_bars else "?",
+        )

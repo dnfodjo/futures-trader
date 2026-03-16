@@ -754,9 +754,10 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
             logger.info("main.multi_instrument_started")
 
         # ── Step 4a: Load prior day levels from Databento historical ─────
+        warmup_bars: list[dict] = []
         if not dry_run and components["databento_client"]:
             try:
-                await _load_prior_day_levels(state_engine, config)
+                warmup_bars = await _load_prior_day_levels(state_engine, config)
             except Exception:
                 logger.warning("main.prior_day_levels_failed", exc_info=True)
 
@@ -823,7 +824,10 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
             price_action_analyzer=components.get("price_action_analyzer"),
             circuit_breakers=components.get("circuit_breakers"),
             apex_guardrail=components.get("apex_guardrail"),
-            rth_reset_fn=state_engine.reset_for_rth,
+            rth_reset_fn=lambda: (
+                state_engine.reset_for_rth(),
+                state_engine.warm_1min_bars(warmup_bars) if warmup_bars else None,
+            ),
             session_stats_fn=state_engine.update_session_stats,
         )
 
@@ -919,11 +923,16 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
 async def _load_prior_day_levels(
     state_engine: StateEngine,
     config: AppConfig,
-) -> None:
+) -> list[dict]:
     """Fetch prior day levels from Databento historical API.
 
     Downloads yesterday's 1-minute bars to determine PDH/PDL/PDC,
     and overnight (Globex pre-market) high/low for ONH/ONL.
+
+    Also computes today's RTH 1-min bars for indicator warmup.
+
+    Returns:
+        List of today's 1-min bar dicts for warming the state engine.
     """
     from datetime import date, timedelta
 
@@ -932,6 +941,8 @@ async def _load_prior_day_levels(
     # Skip weekends
     while yesterday.weekday() >= 5:  # Saturday=5, Sunday=6
         yesterday -= timedelta(days=1)
+
+    today_bars: list[dict] = []
 
     try:
         # Historical API needs parent symbol (MNQ.FUT), not specific contract (MNQM6)
@@ -951,11 +962,11 @@ async def _load_prior_day_levels(
 
         if not trades:
             logger.warning("main.no_prior_day_data", date=yesterday.isoformat())
-            return
+            return today_bars
 
         prices = [t["price"] for t in trades if t.get("price", 0) > 0]
         if not prices:
-            return
+            return today_bars
 
         # Filter outliers using median-based approach.
         # Some Databento historical records contain anomalous prices
@@ -974,7 +985,7 @@ async def _load_prior_day_levels(
                 raw_count=len(prices),
                 median=median_price,
             )
-            return
+            return today_bars
 
         outlier_count = len(prices) - len(filtered_prices)
         if outlier_count > 0:
@@ -1029,8 +1040,73 @@ async def _load_prior_day_levels(
                 trade_count=len(on_prices),
             )
 
+        # ── Compute today's RTH 1-min bars for indicator warmup ──
+        # This allows indicators (EMAs, RSI, MACD) to be available immediately
+        # after a mid-session restart instead of needing 10-50 minutes.
+        now_et = dt.now(et)
+        rth_start = dt(today.year, today.month, today.day, 9, 30, tzinfo=et)
+
+        if now_et > rth_start:
+            # Filter today's RTH trades
+            rth_trades = [
+                t for t in trades
+                if t.get("price", 0) > 0
+                and lower_bound <= t["price"] <= upper_bound
+                and "timestamp" in t
+                and t["timestamp"] >= rth_start
+            ]
+
+            if rth_trades:
+                # Aggregate into 1-min bars
+                current_bar: dict | None = None
+                bar_start: dt | None = None
+
+                for trade in rth_trades:
+                    ts = trade["timestamp"]
+                    price = trade["price"]
+                    vol = trade.get("size", trade.get("volume", 1))
+
+                    if current_bar is None or bar_start is None:
+                        bar_start = ts
+                        current_bar = {
+                            "timestamp": ts.isoformat(),
+                            "open": price,
+                            "high": price,
+                            "low": price,
+                            "close": price,
+                            "volume": vol,
+                        }
+                    elif (ts - bar_start).total_seconds() >= 60:
+                        # Finalize current bar
+                        today_bars.append(current_bar)
+                        bar_start = ts
+                        current_bar = {
+                            "timestamp": ts.isoformat(),
+                            "open": price,
+                            "high": price,
+                            "low": price,
+                            "close": price,
+                            "volume": vol,
+                        }
+                    else:
+                        current_bar["high"] = max(current_bar["high"], price)
+                        current_bar["low"] = min(current_bar["low"], price)
+                        current_bar["close"] = price
+                        current_bar["volume"] = current_bar.get("volume", 0) + vol
+
+                # Don't append the last partial bar — let live ticks complete it
+
+                logger.info(
+                    "main.today_rth_bars_computed",
+                    bar_count=len(today_bars),
+                    first_ts=today_bars[0].get("timestamp", "?") if today_bars else "?",
+                    last_ts=today_bars[-1].get("timestamp", "?") if today_bars else "?",
+                )
+
     except Exception:
         logger.warning("main.prior_day_levels_fetch_failed", exc_info=True)
+
+    return today_bars
 
 
 async def _state_engine_watchdog(state_engine: StateEngine) -> None:
