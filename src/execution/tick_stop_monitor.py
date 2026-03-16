@@ -59,6 +59,8 @@ class TickStopMonitor:
         min_stop_distance: float = 3.0,
         tighten_at_profit: float = 12.0,
         tightened_distance: float = 5.0,
+        mid_tighten_at_profit: float = 6.0,
+        mid_tightened_distance: float = 6.0,
     ) -> None:
         """Initialize the tick stop monitor.
 
@@ -71,6 +73,8 @@ class TickStopMonitor:
             trail_distance: Points to trail behind best price.
             trail_activation_points: Minimum profit before trailing activates.
             min_stop_distance: Never trail stop closer than this to current price.
+            mid_tighten_at_profit: Profit threshold for mid-tier tightening.
+            mid_tightened_distance: Trail distance at mid-tier (between default and tight).
         """
         self._flatten_fn = flatten_fn
         self._target_symbol = target_symbol.upper() if target_symbol else ""
@@ -80,6 +84,8 @@ class TickStopMonitor:
         self._min_stop_distance = min_stop_distance
         self._tighten_at_profit = tighten_at_profit
         self._tightened_distance = tightened_distance
+        self._mid_tighten_at_profit = mid_tighten_at_profit
+        self._mid_tightened_distance = mid_tightened_distance
 
         # Position state
         self._active = False
@@ -144,6 +150,7 @@ class TickStopMonitor:
         elif atr > 0:
             # ATR-based trail: 2x ATR, clamped between 5 and 8 points
             self._trail_distance = round(max(5.0, min(8.0, atr * 2.0)), 1)
+            self._mid_tightened_distance = round(max(4.0, min(6.0, atr * 1.5)), 1)
             self._tightened_distance = round(max(3.0, min(5.0, atr * 1.2)), 1)
         else:
             self._trail_distance = self._default_trail_distance
@@ -312,10 +319,12 @@ class TickStopMonitor:
                     best_price=self._best_price,
                 )
 
-            # Dynamic tightening based on profit
+            # Dynamic tightening based on profit (3 tiers)
             best_profit = self._best_price - self._entry_price
             if best_profit >= self._tighten_at_profit:
                 effective_trail = self._tightened_distance
+            elif best_profit >= self._mid_tighten_at_profit:
+                effective_trail = self._mid_tightened_distance
             else:
                 effective_trail = self._trail_distance
 
@@ -342,10 +351,12 @@ class TickStopMonitor:
                     best_price=self._best_price,
                 )
 
-            # Dynamic tightening based on profit
+            # Dynamic tightening based on profit (3 tiers)
             best_profit = self._entry_price - self._best_price
             if best_profit >= self._tighten_at_profit:
                 effective_trail = self._tightened_distance
+            elif best_profit >= self._mid_tighten_at_profit:
+                effective_trail = self._mid_tightened_distance
             else:
                 effective_trail = self._trail_distance
 
