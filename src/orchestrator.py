@@ -35,6 +35,7 @@ from src.core.types import (
     PositionState,
     SessionPhase,
     SessionSummary,
+    Side,
 )
 from src.agents.bull_bear_debate import BullBearDebate
 from src.agents.reasoner import Reasoner
@@ -43,6 +44,7 @@ from src.execution.kill_switch import KillSwitch
 from src.execution.order_manager import OrderManager
 from src.execution.quantlynk_order_manager import QuantLynkOrderManager
 from src.execution.position_tracker import PositionTracker
+from src.execution.tick_stop_monitor import TickStopMonitor
 from src.execution.trail_manager import TrailManager
 from src.guardrails.guardrail_engine import GuardrailEngine
 from src.learning.kelly_calculator import KellyCalculator
@@ -127,11 +129,13 @@ class TradingOrchestrator:
         regime_tracker: Optional[RegimeTracker] = None,
         kelly_calculator: Optional[KellyCalculator] = None,
         trail_manager: Optional[TrailManager] = None,
+        tick_stop_monitor: Optional[TickStopMonitor] = None,
         bull_bear_debate: Optional[BullBearDebate] = None,
         setup_detector: Optional[Any] = None,
         price_action_analyzer: Optional[Any] = None,
         circuit_breakers: Optional[CircuitBreakers] = None,
         apex_guardrail: Optional[ApexRuleGuardrail] = None,
+        rth_reset_fn: Optional[Callable[[], None]] = None,
     ) -> None:
         self._config = config
         self._bus = event_bus
@@ -159,11 +163,13 @@ class TradingOrchestrator:
         self._regime_tracker = regime_tracker
         self._kelly_calculator = kelly_calculator
         self._trail_manager = trail_manager
+        self._tick_stop_monitor = tick_stop_monitor
         self._debate = bull_bear_debate
         self._setup_detector = setup_detector
         self._price_action_analyzer = price_action_analyzer
         self._circuit_breakers = circuit_breakers
         self._apex = apex_guardrail
+        self._rth_reset_fn = rth_reset_fn
 
         # ── Internal state ──────────────────────────────────────────────────
 
@@ -379,6 +385,14 @@ class TradingOrchestrator:
 
         # 4. Live trading loop
         self._state = OrchestratorState.LIVE_TRADING
+        # Reset tick processor VWAP/delta/volume for RTH session so
+        # metrics are not polluted by overnight/pre-market data
+        if self._rth_reset_fn:
+            self._rth_reset_fn()
+        # Reset flash crash detector to prevent false positives from
+        # overnight/pre-market price gaps at session open
+        if self._kill_switch:
+            self._kill_switch.reset_price_window()
         logger.info("orchestrator.live_trading_started")
 
         await self._trading_loop()
@@ -541,20 +555,104 @@ class TradingOrchestrator:
         if position is not None:
             self._position_tracker.update_unrealized(state.last_price)
 
-        # 2-pre. QuantLynk software stop check (no native broker stops)
+        # 2-pre. Tick stop monitor check — did the monitor already flatten?
+        # The TickStopMonitor fires on every Databento tick and sends flatten
+        # to QuantLynk directly. Here we detect that it triggered and sync
+        # the position tracker / session controller.
+        if (position is not None
+                and self._tick_stop_monitor is not None
+                and self._tick_stop_monitor.is_triggered):
+            trigger_reason = self._tick_stop_monitor.trigger_reason
+            trigger_price = self._tick_stop_monitor._trigger_price
+            logger.warning(
+                "orchestrator.tick_monitor_triggered",
+                reason=trigger_reason,
+                trigger_price=trigger_price,
+                entry_price=self._tick_stop_monitor._entry_price,
+                best_price=self._tick_stop_monitor.best_price,
+                ticks_processed=self._tick_stop_monitor._ticks_processed,
+            )
+
+            # Sync position tracker — the flatten already happened via QuantLynk
+            if self._position_tracker.position is not None:
+                fill_action = "Sell" if position.side == Side.LONG else "Buy"
+                try:
+                    await self._position_tracker.on_fill({
+                        "action": fill_action,
+                        "qty": position.quantity,
+                        "price": trigger_price,
+                    })
+                except Exception:
+                    logger.warning("orchestrator.tick_monitor_fill_sync_failed", exc_info=True)
+
+            # Record the trade
+            last_trade = self._position_tracker.last_trade
+            if last_trade:
+                try:
+                    self._session_ctrl.record_trade(last_trade)
+                except Exception:
+                    logger.warning("orchestrator.tick_monitor_session_record_failed", exc_info=True)
+                if self._trade_logger:
+                    try:
+                        self._trade_logger.log_trade(last_trade)
+                        logger.info(
+                            "orchestrator.tick_monitor_trade_logged",
+                            pnl=round(last_trade.pnl, 2),
+                            daily_pnl=round(self._session_ctrl.daily_pnl, 2),
+                        )
+                    except Exception:
+                        logger.warning("orchestrator.tick_monitor_trade_log_failed", exc_info=True)
+
+            # Send notification
+            if self._alert_manager and last_trade:
+                try:
+                    await self._alert_manager.send_trade_exit(
+                        trade=last_trade,
+                        daily_pnl=self._session_ctrl.daily_pnl,
+                        winners=self._session_ctrl.winners,
+                        losers=self._session_ctrl.losers,
+                    )
+                except Exception:
+                    logger.warning("orchestrator.tick_monitor_notification_failed", exc_info=True)
+
+            # Deactivate monitors
+            self._tick_stop_monitor.deactivate()
+            if self._trail_manager and self._trail_manager.is_active:
+                self._trail_manager.deactivate()
+
+            # Clear QuantLynk order manager stop
+            if isinstance(self._order_manager, QuantLynkOrderManager):
+                self._order_manager.current_stop_price = None
+
+            return
+
+        # 2-pre-backup. QuantLynk software stop check (backup — if tick monitor
+        # is not active or not available, use the old decision-cycle-level check)
         if (position is not None
                 and isinstance(self._order_manager, QuantLynkOrderManager)
+                and self._tick_stop_monitor is None
                 and self._order_manager.check_stop_hit(state.last_price, position.side)):
             logger.warning(
-                "orchestrator.software_stop_hit",
+                "orchestrator.software_stop_hit_backup",
                 price=state.last_price,
                 stop=self._order_manager.current_stop_price,
             )
-            await self._hard_flatten("Software stop hit")
+            await self._hard_flatten("Software stop hit (backup)")
             return
 
-        # 2a. Trail manager — update trailing stop if in position
-        if position is not None and self._trail_manager:
+        # 2a. Trail / stop management — two modes:
+        #   - TickStopMonitor active (QuantLynk): handles trailing + stop check
+        #     on every Databento tick. We just sync the current stop to the
+        #     QuantLynk order manager for stats/logging.
+        #   - TrailManager only (Tradovate): updates on each decision cycle.
+        if position is not None and self._tick_stop_monitor and self._tick_stop_monitor.is_active:
+            # Tick monitor handles trailing on every tick. Sync its current
+            # stop to the order manager for logging/stats.
+            if isinstance(self._order_manager, QuantLynkOrderManager):
+                self._order_manager.current_stop_price = self._tick_stop_monitor.current_stop
+
+        elif position is not None and self._trail_manager:
+            # Fallback: old trail manager (no tick monitor)
             # Activate trail manager if not yet active (handles delayed
             # position sync — fill arrives via REST reconciliation after
             # the initial execute() call)
@@ -806,6 +904,37 @@ class TradingOrchestrator:
                         self._trail_manager.activate(new_position, last_price)
                 elif action.action == ActionType.FLATTEN:
                     self._trail_manager.deactivate()
+
+            # 7a-tick. Activate/deactivate tick stop monitor (QuantLynk)
+            # This fires on every Databento tick — much faster than the
+            # decision-cycle-level trail manager.
+            if self._tick_stop_monitor:
+                if action.action == ActionType.ENTER:
+                    new_position = self._position_tracker.position
+                    if new_position:
+                        # Get stop price from the order manager
+                        stop_price = 0.0
+                        if isinstance(self._order_manager, QuantLynkOrderManager):
+                            stop_price = self._order_manager.current_stop_price or 0.0
+
+                        # Get take profit from the action (if LLM specified one)
+                        tp_price = getattr(action, "take_profit_price", 0.0) or 0.0
+
+                        self._tick_stop_monitor.activate(
+                            side=new_position.side.value,
+                            entry_price=last_price,
+                            stop_price=stop_price,
+                            take_profit_price=tp_price,
+                        )
+                        logger.info(
+                            "orchestrator.tick_stop_monitor_activated",
+                            side=new_position.side.value,
+                            entry=last_price,
+                            stop=stop_price,
+                            take_profit=tp_price,
+                        )
+                elif action.action in (ActionType.FLATTEN, ActionType.STOP_TRADING):
+                    self._tick_stop_monitor.deactivate()
 
             # 7b. Log completed trade + update session P&L on flatten/scale_out
             if action.action in (ActionType.FLATTEN, ActionType.SCALE_OUT):
@@ -1210,6 +1339,10 @@ class TradingOrchestrator:
 
         logger.warning("orchestrator.hard_flatten", reason=reason)
 
+        # Deactivate tick stop monitor so it doesn't also send a flatten
+        if self._tick_stop_monitor and self._tick_stop_monitor.is_active:
+            self._tick_stop_monitor.deactivate()
+
         flatten_action = LLMAction(
             action=ActionType.FLATTEN,
             reasoning=f"Hard flatten: {reason}",
@@ -1250,9 +1383,11 @@ class TradingOrchestrator:
         self._state = OrchestratorState.SHUTTING_DOWN
         logger.info("orchestrator.shutdown_started")
 
-        # 1. Deactivate trail manager
+        # 1. Deactivate trail manager and tick stop monitor
         if self._trail_manager and self._trail_manager.is_active:
             self._trail_manager.deactivate()
+        if self._tick_stop_monitor and self._tick_stop_monitor.is_active:
+            self._tick_stop_monitor.deactivate()
 
         # 2. Hard flatten if we still have a position
         await self._hard_flatten("Shutdown sequence")

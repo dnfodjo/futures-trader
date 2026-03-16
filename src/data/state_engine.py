@@ -700,3 +700,15 @@ class StateEngine:
         self._update_count = 0
         self._error_count = 0
         self._is_critical = False
+
+    def reset_for_rth(self) -> None:
+        """Reset tick processor for RTH session open.
+
+        Clears accumulated VWAP, delta, volume profile, etc. so that
+        RTH session metrics start fresh and are not polluted by
+        overnight/pre-market data.  Prior day and overnight levels
+        are preserved.
+        """
+        self._tick_processor.reset()
+        self._recent_bars.clear()
+        logger.info("state_engine.reset_for_rth")

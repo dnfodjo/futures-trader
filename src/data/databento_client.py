@@ -56,7 +56,12 @@ class DatabentoClient:
     ) -> None:
         self._config = db_config
         self._trading_config = trading_config
-        self._symbols = symbols or ["MNQ.FUT", "ES.FUT"]
+        # Use specific contract symbol for the trading instrument to avoid
+        # rollover ambiguity (e.g., MNQM6 instead of MNQ.FUT which may stream
+        # both expiring and front-month contracts during rollover week).
+        # ES.FUT is fine as a parent — we only use it for cross-market context.
+        default_symbols = [trading_config.symbol, "ES.FUT"]
+        self._symbols = symbols or default_symbols
         self._large_lot_thresh = large_lot_threshold
 
         # Callbacks
@@ -70,6 +75,11 @@ class DatabentoClient:
         self._running = False
         self._last_tick_time: datetime | None = None
         self._reconnect_count = 0
+
+        # Instrument ID → symbol name mapping
+        # Databento live stream uses instrument_ids; we resolve to symbol names
+        # using price heuristics (MNQ > 10000, ES < 10000) on first encounter.
+        self._instrument_map: dict[int, str] = {}
 
         # Stats
         self._trades_received = 0
@@ -171,21 +181,40 @@ class DatabentoClient:
 
             self._client = db.Live(key=self._config.api_key)
 
-            # Subscribe to L1 quotes (top-of-book)
+            # Separate subscriptions: specific contract for trading instrument,
+            # parent symbol for cross-market (ES).
+            # This prevents rollover ambiguity during expiration week.
+            trading_symbol = self._trading_config.symbol  # e.g., "MNQM6"
+            cross_market_symbols = [s for s in self._symbols if s != trading_symbol]
+
+            # Trading instrument: use raw_symbol for exact contract match
             self._client.subscribe(
                 dataset=self._config.dataset,
                 schema="mbp-1",
-                stype_in="parent",
-                symbols=self._symbols,
+                stype_in="raw_symbol",
+                symbols=[trading_symbol],
             )
-
-            # Subscribe to trades
             self._client.subscribe(
                 dataset=self._config.dataset,
                 schema="trades",
-                stype_in="parent",
-                symbols=self._symbols,
+                stype_in="raw_symbol",
+                symbols=[trading_symbol],
             )
+
+            # Cross-market instruments (ES): use parent for auto-roll
+            if cross_market_symbols:
+                self._client.subscribe(
+                    dataset=self._config.dataset,
+                    schema="mbp-1",
+                    stype_in="parent",
+                    symbols=cross_market_symbols,
+                )
+                self._client.subscribe(
+                    dataset=self._config.dataset,
+                    schema="trades",
+                    stype_in="parent",
+                    symbols=cross_market_symbols,
+                )
 
             self._connected = True
             logger.info(
@@ -350,7 +379,7 @@ class DatabentoClient:
                 direction = "unknown"
 
             # Get symbol from instrument_id mapping or raw symbol
-            symbol = self._resolve_symbol(record)
+            symbol = self._resolve_symbol(record, price=price)
 
             # Timestamp from Databento (nanosecond Unix timestamp)
             ts = self._parse_timestamp(record)
@@ -391,7 +420,7 @@ class DatabentoClient:
                 if ask_price > 1e6:
                     ask_price /= 1e9
 
-            symbol = self._resolve_symbol(record)
+            symbol = self._resolve_symbol(record, price=bid_price)
             ts = self._parse_timestamp(record)
 
             return {
@@ -407,23 +436,64 @@ class DatabentoClient:
             logger.exception("databento.parse_quote_error")
             return None
 
-    def _resolve_symbol(self, record: Any) -> str:
+    def _resolve_symbol(self, record: Any, price: float = 0.0) -> str:
         """Resolve the symbol name from a Databento record.
 
-        Databento records have an instrument_id that maps to a symbol
-        via the metadata. We fall back to a generic name if unmapped.
+        Databento live stream records have instrument_id but may not
+        populate the symbol field. We build an instrument_id → symbol
+        mapping using price heuristics on first encounter:
+        - MNQ trades at ~15000-30000
+        - ES trades at ~3000-7000
+
+        Args:
+            record: Databento record object.
+            price: Parsed price (after 1e-9 conversion) for price-based
+                   instrument identification on first encounter.
         """
-        # Try the publisher-assigned symbol first
-        if hasattr(record, "symbol"):
-            return str(record.symbol).strip().rstrip("\x00")
-
-        # Fall back to instrument_id
+        # Check instrument_id mapping first (fastest path)
         iid = getattr(record, "instrument_id", None)
-        if iid is not None:
-            # Rough mapping: even instrument_ids tend to be ES, odd tend to be MNQ
-            # In production, this is resolved via the metadata symbology map
-            return f"instrument_{iid}"
+        if iid is not None and iid in self._instrument_map:
+            return self._instrument_map[iid]
 
+        # Try the publisher-assigned symbol
+        if hasattr(record, "symbol"):
+            sym = str(record.symbol).strip().rstrip("\x00")
+            if sym and sym != "unknown":
+                # Cache the mapping for future lookups
+                if iid is not None:
+                    self._instrument_map[iid] = sym
+                    logger.info(
+                        "databento.instrument_mapped",
+                        instrument_id=iid,
+                        symbol=sym,
+                        source="record.symbol",
+                    )
+                return sym
+
+        # Price-based heuristic for instrument identification
+        if iid is not None and price > 0:
+            if price > 10000:
+                # MNQ range (~15000-30000)
+                mapped = self._trading_config.symbol  # e.g., "MNQM6"
+            elif price > 1000:
+                # ES range (~3000-7000)
+                mapped = "ES"
+            else:
+                mapped = f"instrument_{iid}"
+
+            self._instrument_map[iid] = mapped
+            logger.info(
+                "databento.instrument_mapped",
+                instrument_id=iid,
+                symbol=mapped,
+                price=price,
+                source="price_heuristic",
+            )
+            return mapped
+
+        # Absolute fallback
+        if iid is not None:
+            return f"instrument_{iid}"
         return "unknown"
 
     def _parse_timestamp(self, record: Any) -> datetime:

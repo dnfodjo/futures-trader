@@ -55,12 +55,18 @@ class TickProcessor:
 
     def __init__(
         self,
+        target_symbol: str = "",
         large_lot_threshold: int = 10,
         bar_interval_sec: float = 1.0,
         tape_speed_window_sec: float = 10.0,
         delta_1min_window: int = 60,
         delta_5min_window: int = 300,
     ) -> None:
+        # Symbol filter: only process trades matching this symbol.
+        # Empty string means process all trades (backward compat).
+        self._target_symbol = target_symbol.upper() if target_symbol else ""
+        self._symbol_filter_logged = False  # Log first filtered symbol for debugging
+        self._symbol_accepted_logged = False  # Log first accepted symbol
         self._large_lot_threshold = large_lot_threshold
         self._bar_interval_sec = bar_interval_sec
         self._tape_speed_window = tape_speed_window_sec
@@ -112,6 +118,35 @@ class TickProcessor:
 
         Expected keys: timestamp, symbol, price, size, direction, is_large
         """
+        # Symbol filter: skip trades from other instruments (e.g., ES when
+        # tracking MNQ).  This prevents cross-instrument VWAP pollution.
+        # Use root symbol (first 3 chars, e.g., "MNQ" from "MNQM6") for
+        # matching since Databento may send different contract variants.
+        if self._target_symbol:
+            trade_symbol = (data.get("symbol") or "").upper()
+            root = self._target_symbol[:3] if len(self._target_symbol) >= 3 else self._target_symbol
+            if root not in trade_symbol:
+                if not self._symbol_filter_logged:
+                    logger.info(
+                        "tick_processor.symbol_filtered",
+                        trade_symbol=trade_symbol,
+                        target=self._target_symbol,
+                        root=root,
+                    )
+                    self._symbol_filter_logged = True
+                return
+
+        # Log first accepted trade for debugging
+        if self._target_symbol and not self._symbol_accepted_logged:
+            trade_symbol = (data.get("symbol") or "").upper()
+            logger.info(
+                "tick_processor.symbol_accepted",
+                trade_symbol=trade_symbol,
+                target=self._target_symbol,
+                price=data.get("price"),
+            )
+            self._symbol_accepted_logged = True
+
         async with self._lock:
             now_mono = time.monotonic()
 

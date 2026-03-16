@@ -519,6 +519,21 @@ class TradeLogger:
             scale_outs=row["scale_outs"],
         )
 
+    def reset_all(self) -> None:
+        """Delete all trades and daily summaries.
+
+        Use during testing to start each session with a clean journal
+        so circuit breakers and session stats aren't polluted by
+        previous test runs.
+        """
+        if self._conn is None:
+            return
+
+        self._conn.execute("DELETE FROM trades")
+        self._conn.execute("DELETE FROM daily_summaries")
+        self._conn.commit()
+        logger.info("trade_logger.reset_all", msg="All trades and summaries cleared")
+
     def close(self) -> None:
         """Close the database connection."""
         if self._conn:

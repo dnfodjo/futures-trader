@@ -70,6 +70,9 @@ class KillSwitch:
         # Price tracking for flash crash detection
         self._price_window: list[tuple[float, float]] = []  # (price, timestamp)
         self._window_max_sec: float = flash_crash_seconds
+        self._flash_crash_warmup_sec: float = 15.0  # Need 15s of data before checking
+        self._flash_crash_min_samples: int = 3       # Need at least 3 price points
+        self._flash_crash_start_time: Optional[float] = None  # monotonic time of first price
 
         # State
         self._is_triggered: bool = False
@@ -79,11 +82,24 @@ class KillSwitch:
 
     # ── Flash Crash Detection ──────────────────────────────────────────────────
 
+    def reset_price_window(self) -> None:
+        """Clear the flash crash price window.
+
+        Call this when transitioning to live trading to prevent false
+        positives from overnight/pre-market price gaps.
+        """
+        self._price_window.clear()
+        self._flash_crash_start_time = None
+        logger.info("kill_switch.price_window_reset")
+
     def check_flash_crash(self, price: float, timestamp: float) -> bool:
         """Check if a flash crash has occurred.
 
         Records the price and checks if price has moved >= flash_crash_points
         within the flash_crash_seconds window.
+
+        Requires a warmup period (15s and 3+ samples) to avoid false
+        positives from session open price gaps.
 
         Args:
             price: Current market price.
@@ -95,6 +111,10 @@ class KillSwitch:
         if self._is_triggered:
             return True
 
+        # Track when we first started receiving prices
+        if self._flash_crash_start_time is None:
+            self._flash_crash_start_time = timestamp
+
         # Add to window
         self._price_window.append((price, timestamp))
 
@@ -104,12 +124,29 @@ class KillSwitch:
             (p, t) for p, t in self._price_window if t >= cutoff
         ]
 
-        if len(self._price_window) < 2:
+        # Warmup guard: need enough time and samples for reliable detection
+        elapsed = timestamp - self._flash_crash_start_time
+        if elapsed < self._flash_crash_warmup_sec:
+            return False
+        if len(self._price_window) < self._flash_crash_min_samples:
             return False
 
         # Check max price movement in window
         prices = [p for p, _ in self._price_window]
         max_move = max(prices) - min(prices)
+
+        # Sanity ceiling: >500 NQ points in 60s is a data artifact, not a
+        # real flash crash.  Real NQ crashes are 50-200 points.
+        if max_move > 500:
+            logger.warning(
+                "kill_switch.price_spike_ignored",
+                max_move=max_move,
+                window_size=len(self._price_window),
+                msg="Ignoring likely data artifact (>500pt move)",
+            )
+            # Prune to only the latest price to reset baseline
+            self._price_window = [self._price_window[-1]]
+            return False
 
         if max_move >= self._flash_crash_points:
             self._trigger(

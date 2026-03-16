@@ -53,6 +53,7 @@ from src.execution.rate_limiter import RateLimiter
 from src.execution.tradovate_auth import TradovateAuth
 from src.execution.tradovate_rest import TradovateREST
 from src.execution.tradovate_ws import TradovateWS
+from src.execution.tick_stop_monitor import TickStopMonitor
 from src.execution.trail_manager import TrailManager
 from src.guardrails.apex_rules import ApexRuleGuardrail
 from src.guardrails.circuit_breakers import CircuitBreakers
@@ -213,7 +214,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
 
     # ── Data Layer ──────────────────────────────────────────────────────────
 
-    tick_processor = TickProcessor()
+    tick_processor = TickProcessor(target_symbol=config.trading.symbol)
 
     multi_instrument = MultiInstrumentPoller()
 
@@ -414,6 +415,23 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         activation_profit_pts=4.0,
     )
 
+    # ── Tick-Level Stop Monitor (QuantLynk only) ────────────────────────
+    # Fires on every Databento trade tick. When stop or TP is hit,
+    # immediately sends flatten via QuantLynk — no waiting for the
+    # 10-30 second LLM decision cycle.
+    tick_stop_monitor: Optional[TickStopMonitor] = None
+    if use_quantlynk and quantlynk_client is not None:
+        async def _tick_flatten(price: float) -> Any:
+            """Flatten via QuantLynk — called by TickStopMonitor on stop/TP hit."""
+            return await quantlynk_client.flatten(price=price)
+
+        tick_stop_monitor = TickStopMonitor(
+            flatten_fn=_tick_flatten,
+            trail_distance=12.0,
+            trail_activation_points=4.0,
+            min_stop_distance=4.0,
+        )
+
     bull_bear_debate = BullBearDebate(llm_client=llm_client)
 
     # ── Enhanced Intelligence (optional) ─────────────────────────────────
@@ -487,6 +505,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         "regime_tracker": regime_tracker,
         "kelly_calculator": kelly_calculator,
         "trail_manager": trail_manager,
+        "tick_stop_monitor": tick_stop_monitor,
         "bull_bear_debate": bull_bear_debate,
         "setup_detector": setup_detector,
         "price_action_analyzer": price_action_analyzer,
@@ -608,6 +627,14 @@ async def _connect_databento(
     # Register bar callback for state engine
     tick_processor.on_bar(state_engine.on_bar_completed)
 
+    # Wire TickStopMonitor as a Databento trade handler (QuantLynk only).
+    # This fires on EVERY trade tick, checking stop/TP levels and sending
+    # flatten immediately — no waiting for the LLM decision cycle.
+    tick_stop_monitor: Optional[TickStopMonitor] = components.get("tick_stop_monitor")
+    if tick_stop_monitor is not None:
+        client.on_trade(tick_stop_monitor.on_trade)
+        logger.info("main.tick_stop_monitor_wired")
+
     await client.connect()
     logger.info("main.databento_connected")
 
@@ -654,6 +681,18 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
 
     state_engine: StateEngine = components["state_engine"]
     trade_logger: TradeLogger = components["trade_logger"]
+
+    # ── Reset SQLite journal on startup (testing mode) ────────────────
+    # During the testing/monitoring phase, reset the journal each restart
+    # so circuit breakers and session stats start clean.
+    # Remove this block once system is stable and running in production.
+    if trade_logger:
+        try:
+            trade_logger.reset_all()
+            logger.info("main.journal_reset_for_testing",
+                        msg="SQLite journal cleared on startup (testing mode)")
+        except Exception:
+            logger.warning("main.journal_reset_failed", exc_info=True)
     postmortem_analyzer: PostmortemAnalyzer = components["postmortem_analyzer"]
     event_bus: EventBus = components["event_bus"]
 
@@ -778,11 +817,13 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
             regime_tracker=components["regime_tracker"],
             kelly_calculator=components["kelly_calculator"],
             trail_manager=components["trail_manager"],
+            tick_stop_monitor=components.get("tick_stop_monitor"),
             bull_bear_debate=components["bull_bear_debate"],
             setup_detector=components.get("setup_detector"),
             price_action_analyzer=components.get("price_action_analyzer"),
             circuit_breakers=components.get("circuit_breakers"),
             apex_guardrail=components.get("apex_guardrail"),
+            rth_reset_fn=state_engine.reset_for_rth,
         )
 
         # Install signal handlers for graceful shutdown
