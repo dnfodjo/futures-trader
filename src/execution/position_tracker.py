@@ -121,13 +121,15 @@ class PositionTracker:
                 remaining = self._position.quantity - qty
 
                 if remaining <= 0:
-                    # Position closed
-                    pnl = self._compute_pnl(
+                    # Position closed — include any accumulated partial P&L
+                    remaining_pnl = self._compute_pnl(
                         self._position.side,
                         self._position.avg_entry,
                         price,
                         self._position.quantity,
                     )
+                    # Total P&L = remaining leg + all prior SCALE_OUT partials
+                    total_pnl = remaining_pnl + self._position.realized_pnl
 
                     trade = TradeRecord(
                         timestamp_entry=self._position.entry_time,
@@ -138,7 +140,7 @@ class PositionTracker:
                         entry_price=self._position.avg_entry,
                         exit_price=price,
                         stop_price=self._position.stop_price,
-                        pnl=round(pnl, 2),
+                        pnl=round(total_pnl, 2),
                         max_favorable_excursion=self._position.max_favorable,
                         max_adverse_excursion=self._position.max_adverse,
                         adds=self._position.adds_count,
@@ -147,7 +149,9 @@ class PositionTracker:
 
                     logger.info(
                         "position_tracker.closed",
-                        pnl=round(pnl, 2),
+                        remaining_pnl=round(remaining_pnl, 2),
+                        realized_pnl=round(self._position.realized_pnl, 2),
+                        total_pnl=round(total_pnl, 2),
                         entry=self._position.avg_entry,
                         exit=price,
                     )
@@ -158,14 +162,14 @@ class PositionTracker:
                         type=EventType.POSITION_CHANGED,
                         data={
                             "action": "closed",
-                            "pnl": round(pnl, 2),
+                            "pnl": round(total_pnl, 2),
                             "trade_id": trade.id,
                         },
                     ))
                     return
 
                 else:
-                    # Partial close
+                    # Partial close (SCALE_OUT)
                     pnl_partial = self._compute_pnl(
                         self._position.side,
                         self._position.avg_entry,
@@ -173,8 +177,11 @@ class PositionTracker:
                         qty,
                     )
 
+                    # Accumulate partial P&L so it's included in the final TradeRecord
+                    new_realized = self._position.realized_pnl + pnl_partial
                     self._position = self._position.model_copy(update={
                         "quantity": remaining,
+                        "realized_pnl": round(new_realized, 2),
                     })
 
                     logger.info(
@@ -182,6 +189,7 @@ class PositionTracker:
                         closed_qty=qty,
                         remaining=remaining,
                         partial_pnl=round(pnl_partial, 2),
+                        total_realized=round(new_realized, 2),
                     )
 
             self._bus.publish_nowait(Event(

@@ -816,45 +816,49 @@ class TradingOrchestrator:
                     return
 
                 # 4b. Stop-breach check: After debate (which takes 9-12s),
-                # check if the current price has already moved past where
-                # the stop would be. If so, we'd get instantly stopped out.
-                # Abort the entry to avoid a guaranteed loss.
+                # check if the live price has moved significantly against our
+                # intended direction. If price moved more than 60% of the stop
+                # distance, abort — we'd enter with too little cushion.
                 if (
                     action.action == ActionType.ENTER
                     and action.side is not None
                     and action.stop_distance is not None
                     and state.last_price > 0
                 ):
-                    current_price = state.last_price
+                    decision_price = state.last_price  # price at cycle start
                     stop_dist = action.stop_distance
+
+                    # Get fresh price from tick_stop_monitor (updated every tick)
+                    fresh_price = (
+                        self._tick_stop_monitor._last_price
+                        if self._tick_stop_monitor and self._tick_stop_monitor._last_price > 0
+                        else decision_price
+                    )
+
                     if action.side == Side.LONG:
-                        would_stop = current_price - stop_dist
-                        # If current price is already below the would-be stop
-                        if current_price <= would_stop:
+                        price_moved_against = decision_price - fresh_price
+                        if price_moved_against > stop_dist * 0.6:
                             logger.warning(
                                 "orchestrator.stale_entry_aborted",
                                 side="long",
-                                decision_price=current_price,
-                                would_stop=would_stop,
-                                reason="Price already at/below stop level — debate lag caused stale entry",
+                                decision_price=decision_price,
+                                fresh_price=fresh_price,
+                                moved_against=round(price_moved_against, 2),
+                                stop_dist=stop_dist,
+                                reason="Price fell too far during debate — would enter near stop",
                             )
                             return
                     elif action.side == Side.SHORT:
-                        would_stop = current_price + stop_dist
-                        # For shorts: if current price has moved UP so much
-                        # that we'd be entering very close to the stop, abort.
-                        # Specifically: if the price moved against us by more
-                        # than half the stop distance during debate, abort.
-                        # This means we'd enter with less than 50% of our
-                        # intended stop distance as cushion.
-                        decision_price = state.last_price  # approximate
-                        if current_price >= would_stop:
+                        price_moved_against = fresh_price - decision_price
+                        if price_moved_against > stop_dist * 0.6:
                             logger.warning(
                                 "orchestrator.stale_entry_aborted",
                                 side="short",
-                                decision_price=current_price,
-                                would_stop=would_stop,
-                                reason="Price already at/above stop level — debate lag caused stale entry",
+                                decision_price=decision_price,
+                                fresh_price=fresh_price,
+                                moved_against=round(price_moved_against, 2),
+                                stop_dist=stop_dist,
+                                reason="Price rose too far during debate — would enter near stop",
                             )
                             return
 
@@ -1062,9 +1066,25 @@ class TradingOrchestrator:
                         # Pass ATR for dynamic trail distance
                         current_atr = getattr(state, "atr", 0.0) if state else 0.0
 
+                        # Use actual fill price from position tracker, not
+                        # the stale state.last_price from before debate.
+                        # This prevents stop being anchored to a 20s-old price.
+                        fill_price = new_position.avg_entry
+
+                        # Recalculate stop from actual fill if it was based on stale price
+                        if stop_price > 0 and fill_price != last_price:
+                            stop_dist = abs(last_price - stop_price)
+                            if new_position.side == Side.LONG:
+                                stop_price = round(fill_price - stop_dist, 2)
+                            else:
+                                stop_price = round(fill_price + stop_dist, 2)
+                            # Also update order manager's tracked stop
+                            if isinstance(self._order_manager, QuantLynkOrderManager):
+                                self._order_manager.current_stop_price = stop_price
+
                         self._tick_stop_monitor.activate(
                             side=new_position.side.value,
-                            entry_price=last_price,
+                            entry_price=fill_price,
                             stop_price=stop_price,
                             take_profit_price=tp_price,
                             atr=current_atr,
@@ -1072,7 +1092,8 @@ class TradingOrchestrator:
                         logger.info(
                             "orchestrator.tick_stop_monitor_activated",
                             side=new_position.side.value,
-                            entry=last_price,
+                            entry=fill_price,
+                            stale_price=last_price,
                             stop=stop_price,
                             take_profit=tp_price,
                         )

@@ -97,6 +97,11 @@ class TickStopMonitor:
         self._trigger_reason: str = ""
         self._trigger_price: float = 0.0
 
+        # Grace period — don't check stops for N seconds after activation.
+        # Prevents instant stop-outs from stale entry prices or transient ticks.
+        self._grace_period_sec: float = 1.5
+        self._activation_time: float = 0.0
+
         # Stats
         self._ticks_processed: int = 0
         self._last_price: float = 0.0
@@ -132,6 +137,7 @@ class TickStopMonitor:
         self._triggered = False
         self._trigger_reason = ""
         self._ticks_processed = 0
+        self._activation_time = time.monotonic()
 
         if trail_distance > 0:
             self._trail_distance = trail_distance
@@ -212,11 +218,17 @@ class TickStopMonitor:
         self._ticks_processed += 1
         self._last_price = price
 
-        # Update trail
+        # Grace period — skip stop checks for first N seconds after activation.
+        # Prevents instant stop-outs from stale entry prices or price slippage
+        # between the LLM decision and order execution.
+        elapsed = time.monotonic() - self._activation_time
+        in_grace = elapsed < self._grace_period_sec
+
+        # Update trail (always, even during grace period)
         self._update_trail(price)
 
-        # Check stop-loss
-        if self._check_stop(price):
+        # Check stop-loss (skip during grace period)
+        if not in_grace and self._check_stop(price):
             self._triggered = True
             self._trigger_reason = "stop_hit"
             self._trigger_price = price
@@ -232,8 +244,8 @@ class TickStopMonitor:
             await self._execute_flatten(price)
             return
 
-        # Check take-profit
-        if self._check_take_profit(price):
+        # Check take-profit (skip during grace period)
+        if not in_grace and self._check_take_profit(price):
             self._triggered = True
             self._trigger_reason = "take_profit"
             self._trigger_price = price

@@ -140,6 +140,7 @@ class PositionState(BaseModel):
     time_in_trade_sec: int = 0
     adds_count: int = 0
     entry_time: datetime = Field(default_factory=lambda: datetime.now(tz=UTC))
+    realized_pnl: float = 0.0  # accumulated P&L from partial closes (SCALE_OUT)
 
     @property
     def pnl_per_contract(self) -> float:
