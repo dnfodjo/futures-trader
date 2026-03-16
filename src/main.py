@@ -886,9 +886,17 @@ async def _load_prior_day_levels(
         yesterday -= timedelta(days=1)
 
     try:
+        # Historical API needs parent symbol (MNQ.FUT), not specific contract (MNQM6)
+        hist_symbol = config.trading.symbol
+        if not hist_symbol.endswith(".FUT"):
+            # Strip contract month code: MNQM6 -> MNQ, then add .FUT
+            import re
+            root = re.sub(r"[FGHJKMNQUVXZ]\d+$", "", hist_symbol)
+            hist_symbol = f"{root}.FUT" if root else hist_symbol
+
         trades = await DatabentoClient.fetch_historical(
             api_key=config.databento.api_key,
-            symbol=config.trading.symbol,
+            symbol=hist_symbol,
             start=yesterday.isoformat(),
             end=today.isoformat(),
         )
