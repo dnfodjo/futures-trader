@@ -53,6 +53,7 @@ class TickStopMonitor:
     def __init__(
         self,
         flatten_fn: FlattenFn,
+        target_symbol: str = "",
         trail_distance: float = 12.0,
         trail_activation_points: float = 4.0,
         min_stop_distance: float = 4.0,
@@ -62,11 +63,15 @@ class TickStopMonitor:
         Args:
             flatten_fn: Async function to call for flatten (QuantLynk).
                         Signature: async def flatten(price: float) -> Any
+            target_symbol: Symbol to monitor (e.g., "MNQM6"). Only ticks
+                          matching the root (first 3 chars) are processed.
+                          Empty string means process all (dangerous!).
             trail_distance: Points to trail behind best price.
             trail_activation_points: Minimum profit before trailing activates.
             min_stop_distance: Never trail stop closer than this to current price.
         """
         self._flatten_fn = flatten_fn
+        self._target_symbol = target_symbol.upper() if target_symbol else ""
         self._trail_distance = trail_distance
         self._trail_activation = trail_activation_points
         self._min_stop_distance = min_stop_distance
@@ -165,14 +170,31 @@ class TickStopMonitor:
         """Process a trade tick — check stop and take-profit levels.
 
         This is registered as a Databento trade handler and fires
-        on EVERY incoming MNQ trade tick.
+        on EVERY incoming trade tick. Symbol filtering ensures we only
+        process ticks for our target instrument (e.g., MNQ, not ES).
         """
         if not self._active or self._triggered:
             return
 
+        # Symbol filter: only process ticks for our target instrument.
+        # Without this, ES ticks (~6700) would falsely trigger MNQ stops (~24800).
+        if self._target_symbol:
+            trade_symbol = (data.get("symbol") or "").upper()
+            root = self._target_symbol[:3] if len(self._target_symbol) >= 3 else self._target_symbol
+            if root not in trade_symbol:
+                return
+
         price = data.get("price", 0.0)
         if price <= 0:
             return
+
+        # Sanity check: reject prices wildly different from entry.
+        # A tick at 6700 when entry is 24850 is clearly a different instrument
+        # that bypassed the symbol filter. This prevents catastrophic false stops.
+        if self._entry_price > 0:
+            deviation = abs(price - self._entry_price) / self._entry_price
+            if deviation > 0.10:  # >10% from entry → wrong instrument
+                return
 
         self._ticks_processed += 1
         self._last_price = price
