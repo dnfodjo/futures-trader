@@ -803,6 +803,13 @@ class StateEngine:
                 emas["alignment"] = "bearish_partial"
             else:
                 emas["alignment"] = "mixed_partial"
+        elif ema_9 > 0:
+            # Minimal alignment from EMA 9 vs current price only
+            # (EMA 21 and 50 not yet available — early warmup period)
+            if closes[-1] > ema_9:
+                emas["alignment"] = "bullish_partial"
+            else:
+                emas["alignment"] = "bearish_partial"
 
         # EMA crossover detection (using prior bar's EMAs)
         if len(closes) > 21:

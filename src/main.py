@@ -439,7 +439,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         tick_stop_monitor = TickStopMonitor(
             flatten_fn=_tick_flatten,
             target_symbol=config.trading.symbol,
-            trail_distance=12.0,
+            trail_distance=8.0,
             trail_activation_points=4.0,
             min_stop_distance=4.0,
         )

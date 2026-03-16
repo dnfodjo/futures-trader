@@ -136,9 +136,9 @@ class TickStopMonitor:
         if trail_distance > 0:
             self._trail_distance = trail_distance
         elif atr > 0:
-            # ATR-based trail: 2x ATR, clamped between 5 and 12 points
-            self._trail_distance = round(max(5.0, min(12.0, atr * 2.0)), 1)
-            self._tightened_distance = round(max(3.0, min(8.0, atr * 1.2)), 1)
+            # ATR-based trail: 2x ATR, clamped between 5 and 8 points
+            self._trail_distance = round(max(5.0, min(8.0, atr * 2.0)), 1)
+            self._tightened_distance = round(max(3.0, min(5.0, atr * 1.2)), 1)
         else:
             self._trail_distance = self._default_trail_distance
 
