@@ -48,9 +48,11 @@ fi
 # ── 2. Pull latest code ─────────────────────────────────────────────
 echo "[2/5] Pulling latest code..."
 eval ${SSH_CMD} << REMOTE_PULL
+    git config --global --add safe.directory ${DEPLOY_PATH} 2>/dev/null || true
     cd ${DEPLOY_PATH}
     git fetch origin ${BRANCH}
     git reset --hard origin/${BRANCH}
+    chown -R trader:trader ${DEPLOY_PATH}
 REMOTE_PULL
 
 # ── 3. Install dependencies ─────────────────────────────────────────

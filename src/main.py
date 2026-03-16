@@ -600,7 +600,7 @@ async def _connect_databento(
     client.on_quote(tick_processor.process_quote)
 
     # Register bar callback for state engine
-    tick_processor.on_bar_completed(state_engine.on_bar_completed)
+    tick_processor.on_bar(state_engine.on_bar_completed)
 
     await client.connect()
     logger.info("main.databento_connected")
