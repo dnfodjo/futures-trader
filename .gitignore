@@ -1,0 +1,43 @@
+# ── Secrets (NEVER commit) ────────────────────────────────────────────
+.env
+*.pem
+*.key
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.whl
+.venv/
+venv/
+
+# ── Data (generated at runtime) ──────────────────────────────────────
+data/
+*.db
+*.db-shm
+*.db-wal
+*.parquet
+
+# ── Tools ─────────────────────────────────────────────────────────────
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+*.lock
+
+# ── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Claude Code ───────────────────────────────────────────────────────
+.claude/cache/
+.claude/tsc-cache/
+.claude/settings.local.json
+
+# ── Runtime ───────────────────────────────────────────────────────────
+*.log
+/tmp/futures-trader.lock

@@ -1,0 +1,39 @@
+[Unit]
+Description=MNQ Futures Trading System
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/opt/futures-trader
+Environment=PATH=/opt/futures-trader/.venv/bin:/usr/bin:/bin
+EnvironmentFile=/opt/futures-trader/.env
+ExecStart=/opt/futures-trader/.venv/bin/python -m src.main --paper
+
+# Restart policy — restart on crash, not on clean exit
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Graceful shutdown — send SIGTERM, wait 60s for position flatten, then SIGKILL
+# The trading system catches SIGTERM, flattens any open position, runs postmortem,
+# then exits cleanly. 60s is enough for all of that.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/futures-trader/data /opt/futures-trader/logs /tmp
+PrivateTmp=yes
+
+# Logging
+StandardOutput=append:/opt/futures-trader/logs/trader.log
+StandardError=append:/opt/futures-trader/logs/trader.log
+
+[Install]
+WantedBy=multi-user.target
