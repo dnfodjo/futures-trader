@@ -205,7 +205,7 @@ class TestProfitPreservation:
     def test_no_preservation_by_default(self) -> None:
         ctrl = SessionController()
         ctrl.start_session()
-        assert ctrl.effective_max_contracts == 6
+        assert ctrl.effective_max_contracts == 10
         assert ctrl.profit_preservation_tier == 0
         assert not ctrl.profit_preservation_active
 
@@ -213,7 +213,7 @@ class TestProfitPreservation:
         ctrl = SessionController()
         ctrl.start_session()
         ctrl.record_trade(_make_trade(250.0, commission=0.0))
-        assert ctrl.effective_max_contracts == 3
+        assert ctrl.effective_max_contracts == 6
         assert ctrl.profit_preservation_tier == 1
         assert ctrl.profit_preservation_active
 
@@ -221,14 +221,14 @@ class TestProfitPreservation:
         ctrl = SessionController()
         ctrl.start_session()
         ctrl.record_trade(_make_trade(450.0, commission=0.0))
-        assert ctrl.effective_max_contracts == 2
+        assert ctrl.effective_max_contracts == 4
         assert ctrl.profit_preservation_tier == 2
 
     def test_tier_not_active_below_threshold(self) -> None:
         ctrl = SessionController()
         ctrl.start_session()
         ctrl.record_trade(_make_trade(150.0, commission=0.0))
-        assert ctrl.effective_max_contracts == 6
+        assert ctrl.effective_max_contracts == 10
         assert ctrl.profit_preservation_tier == 0
 
     def test_custom_tier_values(self) -> None:

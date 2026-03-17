@@ -42,10 +42,10 @@ class SessionController:
         commission_per_rt: float = 0.86,
         point_value: float = 2.0,
         profit_tier1_pnl: float = 200.0,
-        profit_tier1_max_size: int = 3,
+        profit_tier1_max_size: int = 6,
         profit_tier2_pnl: float = 400.0,
-        profit_tier2_max_size: int = 2,
-        base_max_contracts: int = 6,
+        profit_tier2_max_size: int = 4,
+        base_max_contracts: int = 10,
     ) -> None:
         self._max_daily_loss = max_daily_loss
         self._commission_per_rt = commission_per_rt
