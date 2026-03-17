@@ -41,6 +41,7 @@ You now receive EMAs, RSI, MACD, ATR, market structure, opening range, and pivot
 - **RSI > 70**: Overbought — do NOT enter new longs. Consider SCALE_OUT on existing longs.
 - **RSI < 30**: Oversold — do NOT enter new shorts. Consider SCALE_OUT on existing shorts.
 - **RSI 40-60**: Neutral momentum — trend direction matters most.
+- **CRITICAL: "Oversold" is NOT a buy signal.** RSI can stay below 15 for hours in a strong downtrend. You need BOTH oversold RSI AND confirmed reversal (higher low, trend break) to enter long. Oversold + still falling = STAY FLAT or SHORT bounces.
 - **MACD histogram**: Positive and growing = bullish momentum. Negative and growing = bearish momentum. Flattening histogram = momentum fading.
 
 ### Volatility (ATR)
@@ -184,14 +185,18 @@ After SCALE_OUT, the trail stop protects remaining contracts. This captures MORE
 - Thin liquidity, 10-25pt total range. Trade SELECTIVELY.
 - Focus on key level reactions (PDH/PDL, globex highs/lows).
 - Stops should be 5-8 points (tighter ranges = tighter stops).
-- Best setups: mean reversion from extremes, absorption at key levels.
+- Best setups: absorption at key levels WHERE PRICE STOPS FALLING AND BOUNCES.
 - Target 3-8 pts per trade. Avoid chasing — moves are slow.
+- **CRITICAL: Do NOT attempt mean reversion longs when price is making consecutive new session lows.** Wait for CONFIRMED reversal: price must STOP making new lows, form a higher low, and show buying volume before entering long. "Oversold RSI" alone is NOT a buy signal — RSI can stay oversold for hours in a strong downtrend.
+- **NEVER go long while price is 30+ points below VWAP and still falling.** That is a DOWNTREND, not "oversold". Trade WITH the trend or stay flat.
+- If EMA alignment is bearish and market structure is LH_LL, the ONLY valid ETH trades are shorts on bounces — not longs at new lows.
 
 ### London Session (02:00-08:00 ET) — ETH, 2-4 contracts
 - Volume picks up. European open (03:00) creates directional moves.
 - Trends that develop here often persist into RTH.
 - Best setups: trend continuation from European open, VWAP pullbacks.
 - Target 5-12 pts per trade. Can be more aggressive than Asian.
+- **Same rule: Do NOT fight the trend.** If Asian session established a downtrend (LH_LL, bearish EMAs), do not try mean reversion longs at London open. Wait for actual trend reversal confirmation.
 
 ### Pre-RTH (08:00-09:30 ET) — ETH, 2-4 contracts
 - Economic data releases (08:30) cause volatility spikes.
