@@ -1147,8 +1147,35 @@ class TradingOrchestrator:
                 elif action.action in (ActionType.FLATTEN, ActionType.STOP_TRADING):
                     self._tick_stop_monitor.deactivate()
 
-            # 7b. Log completed trade + update session P&L on flatten/scale_out
-            if action.action in (ActionType.FLATTEN, ActionType.SCALE_OUT):
+            # 7b. Log completed trade + update session P&L
+            if action.action == ActionType.SCALE_OUT:
+                # SCALE_OUT: Track partial P&L without creating a TradeRecord.
+                # The position_tracker accumulates partials in realized_pnl;
+                # when the position fully closes, record_trade() subtracts these
+                # to avoid double-counting.
+                pos_after = self._position_tracker.position
+                if pos_after is not None:
+                    # partial P&L = total realized so far (includes this SCALE_OUT)
+                    # minus what we've already tracked
+                    partial_pnl = pos_after.realized_pnl - self._session_ctrl.partial_pnl_accumulated
+                    try:
+                        self._session_ctrl.record_scale_out(partial_pnl)
+                    except Exception:
+                        logger.warning("orchestrator.scale_out_pnl_failed", exc_info=True)
+
+                    # Sync session stats to state engine
+                    if self._session_stats_fn:
+                        try:
+                            await self._session_stats_fn(
+                                daily_pnl=self._session_ctrl.daily_pnl,
+                                daily_trades=self._session_ctrl.total_trades,
+                                daily_winners=self._session_ctrl.winners,
+                                daily_losers=self._session_ctrl.losers,
+                            )
+                        except Exception:
+                            logger.warning("orchestrator.session_stats_sync_failed", exc_info=True)
+
+            elif action.action == ActionType.FLATTEN:
                 last_trade = self._position_tracker.last_trade
                 if last_trade:
                     # Update session controller (daily P&L, win/loss, limits)

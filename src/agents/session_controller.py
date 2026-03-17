@@ -63,6 +63,7 @@ class SessionController:
         self._daily_pnl: float = 0.0
         self._gross_pnl: float = 0.0
         self._commissions: float = 0.0
+        self._partial_pnl_accumulated: float = 0.0  # SCALE_OUT P&L already in gross
         self._trades: list[TradeRecord] = []
         self._winners: int = 0
         self._losers: int = 0
@@ -83,6 +84,7 @@ class SessionController:
         self._daily_pnl = 0.0
         self._gross_pnl = 0.0
         self._commissions = 0.0
+        self._partial_pnl_accumulated = 0.0
         self._trades.clear()
         self._winners = 0
         self._losers = 0
@@ -98,8 +100,48 @@ class SessionController:
 
     # ── Trade Recording ──────────────────────────────────────────────────────
 
+    def record_scale_out(self, partial_pnl: float, commission: float | None = None) -> None:
+        """Record partial P&L from a SCALE_OUT without creating a trade record.
+
+        SCALE_OUTs don't close the full position, so there's no TradeRecord yet.
+        We track the partial P&L here so daily_pnl reflects reality in real-time.
+        When the position fully closes, record_trade() subtracts this accumulated
+        partial to avoid double-counting (since TradeRecord.pnl includes all partials).
+
+        Args:
+            partial_pnl: The P&L from the partial close.
+            commission: Commission for this round trip (defaults to standard rate).
+        """
+        comm = commission if commission is not None else self._commission_per_rt
+
+        self._partial_pnl_accumulated += partial_pnl
+        self._gross_pnl += partial_pnl
+        self._commissions += comm
+        self._daily_pnl = self._gross_pnl - self._commissions
+
+        # Update peak/drawdown tracking
+        if self._daily_pnl > self._peak_pnl:
+            self._peak_pnl = self._daily_pnl
+        drawdown = self._peak_pnl - self._daily_pnl
+        if drawdown > self._max_drawdown:
+            self._max_drawdown = drawdown
+
+        # Check stop conditions (daily loss limit applies to partial P&L too)
+        self._check_stop_conditions()
+
+        logger.info(
+            "session_controller.scale_out_recorded",
+            partial_pnl=round(partial_pnl, 2),
+            accumulated_partials=round(self._partial_pnl_accumulated, 2),
+            daily_pnl=round(self._daily_pnl, 2),
+        )
+
     def record_trade(self, trade: TradeRecord) -> None:
         """Record a completed trade and update all session stats.
+
+        When a position had SCALE_OUTs before closing, the TradeRecord.pnl
+        already includes those partial P&Ls. We subtract any partials we
+        already tracked via record_scale_out() to avoid double-counting.
 
         Args:
             trade: The completed TradeRecord with P&L populated.
@@ -109,7 +151,13 @@ class SessionController:
         pnl = trade.pnl or 0.0
         commission = trade.commissions if trade.commissions is not None else self._commission_per_rt
 
-        self._gross_pnl += pnl
+        # Subtract already-tracked SCALE_OUT partials to avoid double-counting.
+        # TradeRecord.pnl = remaining_leg_pnl + all SCALE_OUT partials,
+        # and we've already added the SCALE_OUT partials via record_scale_out().
+        net_new_pnl = pnl - self._partial_pnl_accumulated
+        self._partial_pnl_accumulated = 0.0  # Reset for next trade cycle
+
+        self._gross_pnl += net_new_pnl
         self._commissions += commission
         self._daily_pnl = self._gross_pnl - self._commissions
 
@@ -234,6 +282,11 @@ class SessionController:
     @property
     def gross_pnl(self) -> float:
         return self._gross_pnl
+
+    @property
+    def partial_pnl_accumulated(self) -> float:
+        """SCALE_OUT partial P&L already tracked in gross_pnl."""
+        return self._partial_pnl_accumulated
 
     @property
     def commissions(self) -> float:

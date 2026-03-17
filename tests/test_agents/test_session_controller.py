@@ -288,6 +288,111 @@ class TestPnlPerTrade:
         assert ctrl.pnl_per_trade == 75.0
 
 
+# ── Test: SCALE_OUT Partial P&L ──────────────────────────────────────────────
+
+
+class TestScaleOutPnl:
+    def test_record_scale_out_updates_daily_pnl(self) -> None:
+        """SCALE_OUT partial P&L should be reflected in daily P&L immediately."""
+        ctrl = SessionController()
+        ctrl.start_session()
+        ctrl.record_scale_out(30.0, commission=0.86)
+        assert ctrl.gross_pnl == 30.0
+        assert ctrl.commissions == 0.86
+        assert ctrl.daily_pnl == pytest.approx(29.14, abs=0.01)
+        assert ctrl.partial_pnl_accumulated == 30.0
+
+    def test_scale_out_then_full_close_no_double_count(self) -> None:
+        """When position closes after SCALE_OUTs, total P&L must not double-count."""
+        ctrl = SessionController()
+        ctrl.start_session()
+
+        # Two SCALE_OUTs, each +$30 partial P&L
+        ctrl.record_scale_out(30.0, commission=0.86)
+        ctrl.record_scale_out(30.0, commission=0.86)
+
+        # gross = 60, commissions = 1.72, accumulated = 60
+        assert ctrl.gross_pnl == pytest.approx(60.0, abs=0.01)
+        assert ctrl.partial_pnl_accumulated == pytest.approx(60.0, abs=0.01)
+
+        # Now position fully closes — TradeRecord includes ALL P&L (partials + remaining)
+        # Total trade pnl = 60 (from scale_outs) + 40 (remaining leg) = 100
+        trade = _make_trade(100.0, commission=0.86)
+        ctrl.record_trade(trade)
+
+        # gross should be: 60 (scale_outs) + (100 - 60) = 100
+        assert ctrl.gross_pnl == pytest.approx(100.0, abs=0.01)
+        # Commissions: 0.86 + 0.86 + 0.86 = 2.58
+        assert ctrl.commissions == pytest.approx(2.58, abs=0.01)
+        # Net daily P&L = 100 - 2.58 = 97.42
+        assert ctrl.daily_pnl == pytest.approx(97.42, abs=0.01)
+
+    def test_scale_out_resets_accumulated_after_trade(self) -> None:
+        """Accumulated partials reset to 0 after recording a full trade."""
+        ctrl = SessionController()
+        ctrl.start_session()
+
+        ctrl.record_scale_out(50.0, commission=0.0)
+        assert ctrl.partial_pnl_accumulated == 50.0
+
+        ctrl.record_trade(_make_trade(80.0, commission=0.0))
+        assert ctrl.partial_pnl_accumulated == 0.0
+
+    def test_scale_out_triggers_daily_loss_limit(self) -> None:
+        """Partial SCALE_OUT losses should trigger daily loss limit."""
+        ctrl = SessionController(max_daily_loss=100.0)
+        ctrl.start_session()
+        ctrl.record_scale_out(-120.0, commission=0.0)
+        assert ctrl.should_stop_trading
+
+    def test_no_scale_outs_record_trade_unchanged(self) -> None:
+        """Without any SCALE_OUTs, record_trade works exactly as before."""
+        ctrl = SessionController()
+        ctrl.start_session()
+        ctrl.record_trade(_make_trade(100.0, commission=0.86))
+        assert ctrl.gross_pnl == 100.0
+        assert ctrl.daily_pnl == pytest.approx(99.14, abs=0.01)
+        assert ctrl.winners == 1
+        assert ctrl.total_trades == 1
+
+    def test_scale_out_updates_peak_and_drawdown(self) -> None:
+        """SCALE_OUT P&L should update peak and drawdown tracking."""
+        ctrl = SessionController()
+        ctrl.start_session()
+        ctrl.record_scale_out(200.0, commission=0.0)
+        assert ctrl.peak_pnl == 200.0
+
+        ctrl.record_scale_out(-80.0, commission=0.0)
+        # daily = 120, peak was 200, drawdown = 80
+        assert ctrl.max_drawdown == pytest.approx(80.0, abs=0.01)
+
+    def test_multiple_trade_cycles_with_scale_outs(self) -> None:
+        """Multiple trade cycles: each resets accumulated partials."""
+        ctrl = SessionController()
+        ctrl.start_session()
+
+        # First trade cycle: scale out +20, close total +60
+        ctrl.record_scale_out(20.0, commission=0.0)
+        ctrl.record_trade(_make_trade(60.0, commission=0.0))
+        assert ctrl.gross_pnl == pytest.approx(60.0, abs=0.01)
+
+        # Second trade cycle: scale out +30, close total +80
+        ctrl.record_scale_out(30.0, commission=0.0)
+        ctrl.record_trade(_make_trade(80.0, commission=0.0))
+        # gross = 60 + 30 + (80-30) = 140
+        assert ctrl.gross_pnl == pytest.approx(140.0, abs=0.01)
+
+    def test_session_reset_clears_accumulated(self) -> None:
+        """Starting a new session clears accumulated partial P&L."""
+        ctrl = SessionController()
+        ctrl.start_session()
+        ctrl.record_scale_out(50.0, commission=0.0)
+        assert ctrl.partial_pnl_accumulated == 50.0
+
+        ctrl.start_session("2025-03-15")
+        assert ctrl.partial_pnl_accumulated == 0.0
+
+
 # ── Test: Stats ──────────────────────────────────────────────────────────────
 
 
