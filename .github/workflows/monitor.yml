@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: "Command to run (journal, logs, status, health)"
+        description: "Command to run"
         required: false
         default: "status"
         type: choice
         options:
           - status
           - logs
+          - app-logs
           - journal
           - health
           - decisions
@@ -45,8 +46,12 @@ jobs:
               eval ${SSH_CMD} "uptime"
               ;;
             logs)
-              echo "=== Last 100 Log Lines ==="
+              echo "=== Last 100 journalctl Lines ==="
               eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 100"
+              ;;
+            app-logs)
+              echo "=== Last 200 App Log Lines ==="
+              eval ${SSH_CMD} "tail -200 /opt/futures-trader/logs/trader.log 2>/dev/null || echo 'No app log file found'"
               ;;
             journal)
               echo "=== Recent Trades ==="
@@ -72,14 +77,17 @@ jobs:
               eval ${SSH_CMD} "grep -E '^TRADE_' /opt/futures-trader/.env"
               ;;
             decisions)
-              echo "=== Recent LLM Decisions (last 50 lines with ENTER/EXIT/DO_NOTHING) ==="
-              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 | grep -iE 'action|decision|enter|exit|flatten|confidence|quantity|contracts' | tail -50"
+              echo "=== Recent LLM Decisions from App Log ==="
+              eval ${SSH_CMD} "grep -iE 'action_validated|llm_decision|trade_entry|trade_exit|do_nothing|confidence|ENTER|FLATTEN' /opt/futures-trader/logs/trader.log 2>/dev/null | tail -50 || echo 'No decisions found'"
+              echo ""
+              echo "=== Recent Decisions from journalctl ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 1000 2>/dev/null | grep -iE 'action|decision|enter|exit|flatten|confidence|quantity|do_nothing' | tail -30"
               ;;
             errors)
-              echo "=== Recent Errors ==="
-              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 --priority=err"
+              echo "=== Recent Errors from App Log ==="
+              eval ${SSH_CMD} "grep -iE 'error|exception|traceback|failed' /opt/futures-trader/logs/trader.log 2>/dev/null | tail -30 || echo 'No errors in app log'"
               echo ""
-              echo "=== Recent Warnings ==="
-              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 --priority=warning | tail -20"
+              echo "=== Recent Errors from journalctl ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 --priority=err 2>/dev/null | tail -20"
               ;;
           esac
