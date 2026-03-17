@@ -9,8 +9,11 @@ import uuid
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
+
+_ET = ZoneInfo("US/Eastern")
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
@@ -320,8 +323,11 @@ class MarketState(BaseModel):
         Includes computed signals (VWAP distance, level proximity) that
         help the LLM apply the 5-gate filter efficiently.
         """
+        # Convert timestamp to ET so the LLM sees the correct Eastern Time
+        # (the raw timestamp is UTC, and the LLM was misreading it as ET)
+        ts_et = self.timestamp.astimezone(_ET) if self.timestamp.tzinfo else self.timestamp
         d: dict = {
-            "timestamp": self.timestamp.isoformat(),
+            "timestamp": ts_et.isoformat(),
             "symbol": self.symbol,
             "price": {
                 "last": self.last_price,
