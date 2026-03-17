@@ -55,6 +55,23 @@ eval ${SSH_CMD} << REMOTE_PULL
     chown -R trader:trader ${DEPLOY_PATH}
 REMOTE_PULL
 
+# ── 2b. Sync .env config values ───────────────────────────────────
+echo "[2b/5] Syncing config values in .env..."
+eval ${SSH_CMD} << 'REMOTE_ENV_SYNC'
+    cd /opt/futures-trader
+    # Update max_contracts if set to old value
+    sed -i 's/^TRADE_MAX_CONTRACTS=10$/TRADE_MAX_CONTRACTS=6/' .env 2>/dev/null || true
+    sed -i 's/^TRADE_MAX_CONTRACTS_ETH=4$/TRADE_MAX_CONTRACTS_ETH=3/' .env 2>/dev/null || true
+    # Update profit preservation tiers
+    sed -i 's/^TRADE_PROFIT_PRESERVATION_TIER1_PNL=200.0$/TRADE_PROFIT_PRESERVATION_TIER1_PNL=150.0/' .env 2>/dev/null || true
+    sed -i 's/^TRADE_PROFIT_PRESERVATION_TIER1_MAX_SIZE=6$/TRADE_PROFIT_PRESERVATION_TIER1_MAX_SIZE=4/' .env 2>/dev/null || true
+    sed -i 's/^TRADE_PROFIT_PRESERVATION_TIER2_PNL=400.0$/TRADE_PROFIT_PRESERVATION_TIER2_PNL=300.0/' .env 2>/dev/null || true
+    sed -i 's/^TRADE_PROFIT_PRESERVATION_TIER2_MAX_SIZE=4$/TRADE_PROFIT_PRESERVATION_TIER2_MAX_SIZE=2/' .env 2>/dev/null || true
+    echo "  Config synced. Current TRADE_ values:"
+    grep '^TRADE_MAX' .env || echo "  (no TRADE_MAX entries)"
+    grep '^TRADE_PROFIT' .env || echo "  (no TRADE_PROFIT entries)"
+REMOTE_ENV_SYNC
+
 # ── 3. Install dependencies ─────────────────────────────────────────
 echo "[3/5] Installing dependencies..."
 eval ${SSH_CMD} << REMOTE_INSTALL
