@@ -165,6 +165,7 @@ class QuantLynkClient:
                             price=price,
                             status=resp.status,
                             latency_ms=elapsed_ms,
+                            response_body=response_text[:500],
                         )
                         return {
                             "status": "sent",
@@ -172,7 +173,7 @@ class QuantLynkClient:
                             "quantity": quantity,
                             "price": price,
                             "http_status": resp.status,
-                            "response": response_text[:200],
+                            "response": response_text[:500],
                             "latency_ms": elapsed_ms,
                         }
 
