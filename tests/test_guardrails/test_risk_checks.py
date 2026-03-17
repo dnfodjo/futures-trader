@@ -186,3 +186,73 @@ class TestPassthrough:
         action = _action(action=ActionType.DO_NOTHING, confidence=0.0)
         result = guard.check(action, _state())
         assert result.allowed is True
+
+
+# ── Gate 1: Counter-Trend Enforcement ─────────────────────────────────────
+
+
+class TestGate1Enforcement:
+    """Programmatic enforcement: no shorts with bullish EMAs, no longs with bearish EMAs."""
+
+    def test_short_blocked_with_bullish_emas(self, guard):
+        state = _state(emas={"ema_9": 100, "ema_21": 99, "ema_50": 98, "alignment": "bullish"})
+        action = _action(side=Side.SHORT, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is False
+        assert "Gate 1 violation" in result.reason
+        assert "SHORT" in result.reason
+
+    def test_long_blocked_with_bearish_emas(self, guard):
+        state = _state(emas={"ema_9": 98, "ema_21": 99, "ema_50": 100, "alignment": "bearish"})
+        action = _action(side=Side.LONG, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is False
+        assert "Gate 1 violation" in result.reason
+        assert "LONG" in result.reason
+
+    def test_long_allowed_with_bullish_emas(self, guard):
+        state = _state(emas={"ema_9": 100, "ema_21": 99, "ema_50": 98, "alignment": "bullish"})
+        action = _action(side=Side.LONG, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is True
+
+    def test_short_allowed_with_bearish_emas(self, guard):
+        state = _state(emas={"ema_9": 98, "ema_21": 99, "ema_50": 100, "alignment": "bearish"})
+        action = _action(side=Side.SHORT, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is True
+
+    def test_either_direction_allowed_with_mixed_emas(self, guard):
+        state = _state(emas={"ema_9": 100, "ema_21": 98, "ema_50": 99, "alignment": "mixed"})
+        for side in (Side.LONG, Side.SHORT):
+            action = _action(side=side, confidence=0.8)
+            result = guard.check(action, state)
+            assert result.allowed is True
+
+    def test_short_blocked_with_bullish_partial(self, guard):
+        state = _state(emas={"ema_9": 100, "ema_21": 99, "alignment": "bullish_partial"})
+        action = _action(side=Side.SHORT, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is False
+
+    def test_long_blocked_with_bearish_partial(self, guard):
+        state = _state(emas={"ema_9": 98, "ema_21": 99, "alignment": "bearish_partial"})
+        action = _action(side=Side.LONG, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is False
+
+    def test_no_emas_allows_both_directions(self, guard):
+        """When EMAs aren't available, don't block any direction."""
+        state = _state(emas={})
+        for side in (Side.LONG, Side.SHORT):
+            action = _action(side=side, confidence=0.8)
+            result = guard.check(action, state)
+            assert result.allowed is True
+
+    def test_gate1_only_applies_to_enter(self, guard):
+        """ADD, SCALE_OUT, FLATTEN should not be blocked by Gate 1."""
+        state = _state(emas={"ema_9": 100, "ema_21": 99, "ema_50": 98, "alignment": "bullish"})
+        # SCALE_OUT short should be fine (you're reducing an existing position)
+        action = _action(action=ActionType.SCALE_OUT, side=Side.SHORT, confidence=0.8)
+        result = guard.check(action, state)
+        assert result.allowed is True

@@ -123,4 +123,38 @@ class RiskCheckGuardrail:
                 ),
             )
 
+        # 5. Gate 1 enforcement: NO counter-trend entries
+        # This is the #1 source of losses — the LLM ignores prompt instructions
+        # to not trade against EMA alignment. Enforce it programmatically.
+        if action.action == ActionType.ENTER and action.side is not None and state.emas:
+            alignment = state.emas.get("alignment", "")
+            if alignment in ("bullish", "bullish_partial") and action.side.value == "short":
+                logger.warning(
+                    "risk_check.gate1_violation",
+                    ema_alignment=alignment,
+                    attempted_side="short",
+                    reasoning=action.reasoning[:100] if action.reasoning else "",
+                )
+                return GuardrailResult(
+                    allowed=False,
+                    reason=(
+                        f"risk_check: Gate 1 violation — cannot SHORT with "
+                        f"{alignment} EMA alignment. EMAs must be bearish or mixed."
+                    ),
+                )
+            if alignment in ("bearish", "bearish_partial") and action.side.value == "long":
+                logger.warning(
+                    "risk_check.gate1_violation",
+                    ema_alignment=alignment,
+                    attempted_side="long",
+                    reasoning=action.reasoning[:100] if action.reasoning else "",
+                )
+                return GuardrailResult(
+                    allowed=False,
+                    reason=(
+                        f"risk_check: Gate 1 violation — cannot go LONG with "
+                        f"{alignment} EMA alignment. EMAs must be bullish or mixed."
+                    ),
+                )
+
         return GuardrailResult(allowed=True)
