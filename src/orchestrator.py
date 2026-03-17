@@ -572,6 +572,13 @@ class TradingOrchestrator:
         if position is not None:
             self._position_tracker.update_unrealized(state.last_price)
 
+        # 2a. Sync state.position with live position tracker (fixes ghost positions)
+        # state_engine.last_state may cache a stale position if tick_stop_monitor
+        # closed the position between compute cycles.
+        if (position is None) != (state.position is None):
+            state = state.model_copy(update={"position": position})
+            self._last_state = state
+
         # 2-pre. Tick stop monitor check — did the monitor already flatten?
         # The TickStopMonitor fires on every Databento tick and sends flatten
         # to QuantLynk directly. Here we detect that it triggered and sync
