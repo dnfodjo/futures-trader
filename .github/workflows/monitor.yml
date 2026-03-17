@@ -16,6 +16,8 @@ on:
           - health
           - decisions
           - errors
+          - ql-config
+          - service-file
 
 jobs:
   monitor:
@@ -89,5 +91,22 @@ jobs:
               echo ""
               echo "=== Recent Errors from journalctl ==="
               eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 --priority=err 2>/dev/null | tail -20"
+              ;;
+            ql-config)
+              echo "=== QuantLynk Config (masked) ==="
+              eval ${SSH_CMD} "grep -E '^QL_' /opt/futures-trader/.env 2>/dev/null | sed 's/\(=.\{8\}\).*/\1...MASKED/' || echo 'No QL_ vars found'"
+              echo ""
+              echo "=== QuantLynk Logs ==="
+              eval ${SSH_CMD} "grep -iE 'quantlynk|ql_|webhook' /opt/futures-trader/logs/trader.log 2>/dev/null | tail -30 || echo 'No QuantLynk logs'"
+              echo ""
+              echo "=== All Enabled Flags ==="
+              eval ${SSH_CMD} "grep -iE 'enabled|disabled|dry|paper' /opt/futures-trader/.env 2>/dev/null || echo 'No flags found'"
+              ;;
+            service-file)
+              echo "=== systemd Service File ==="
+              eval ${SSH_CMD} "cat /etc/systemd/system/futures-trader.service"
+              echo ""
+              echo "=== Recent journalctl (full output, last 200 lines) ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 200 --output=cat"
               ;;
           esac
