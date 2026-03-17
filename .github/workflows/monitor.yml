@@ -1,0 +1,85 @@
+name: VPS Monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Command to run (journal, logs, status, health)"
+        required: false
+        default: "status"
+        type: choice
+        options:
+          - status
+          - logs
+          - journal
+          - health
+          - decisions
+          - errors
+
+jobs:
+  monitor:
+    name: VPS Monitor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get install -y sshpass
+
+      - name: Run monitor command
+        env:
+          SSH_HOST: ${{ secrets.VPS_HOST }}
+          SSH_USER: ${{ secrets.VPS_USER }}
+          SSH_PASSWORD: ${{ secrets.VPS_SSH_PASSWORD }}
+          COMMAND: ${{ inputs.command }}
+        run: |
+          SSH_CMD="sshpass -p '${SSH_PASSWORD}' ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST}"
+
+          case "${COMMAND}" in
+            status)
+              echo "=== Service Status ==="
+              eval ${SSH_CMD} "systemctl status futures-trader --no-pager -l | head -30"
+              echo ""
+              echo "=== Memory Usage ==="
+              eval ${SSH_CMD} "ps aux --sort=-%mem | head -5"
+              echo ""
+              echo "=== Uptime ==="
+              eval ${SSH_CMD} "uptime"
+              ;;
+            logs)
+              echo "=== Last 100 Log Lines ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 100"
+              ;;
+            journal)
+              echo "=== Recent Trades ==="
+              eval ${SSH_CMD} "cd /opt/futures-trader && .venv/bin/python -c \"
+              import sqlite3, json
+              db = sqlite3.connect('data/journal.db')
+              db.row_factory = sqlite3.Row
+              rows = db.execute('SELECT * FROM trades ORDER BY rowid DESC LIMIT 10').fetchall()
+              for r in rows:
+                  print(json.dumps(dict(r), default=str))
+              db.close()
+              \" 2>/dev/null || echo 'No journal DB or no trades yet'"
+              ;;
+            health)
+              echo "=== Full Health Check ==="
+              eval ${SSH_CMD} "systemctl is-active futures-trader && echo 'Service: ACTIVE' || echo 'Service: DOWN'"
+              echo ""
+              eval ${SSH_CMD} "df -h /opt/futures-trader | tail -1"
+              echo ""
+              eval ${SSH_CMD} "free -h | head -2"
+              echo ""
+              echo "=== .env Config (non-secret) ==="
+              eval ${SSH_CMD} "grep -E '^TRADE_' /opt/futures-trader/.env"
+              ;;
+            decisions)
+              echo "=== Recent LLM Decisions (last 50 lines with ENTER/EXIT/DO_NOTHING) ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 | grep -iE 'action|decision|enter|exit|flatten|confidence|quantity|contracts' | tail -50"
+              ;;
+            errors)
+              echo "=== Recent Errors ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 --priority=err"
+              echo ""
+              echo "=== Recent Warnings ==="
+              eval ${SSH_CMD} "journalctl -u futures-trader --no-pager -n 500 --priority=warning | tail -20"
+              ;;
+          esac
