@@ -141,9 +141,11 @@ If ANY gate fails → DO_NOTHING.
 
 ### 6. Mean Reversion from Extended (55% win rate, ONLY in choppy/mixed EMAs)
 - **Conditions**: Mixed EMA alignment, RSI extreme (>70 or <30), price >12pts from VWAP
-- **Entry**: Fade back toward VWAP
+- **CRITICAL: Price must be STALLING at the extreme** — look for 2+ doji/indecision bars, declining volume, or delta flattening. If price is STILL making new highs/lows, it's NOT exhausted — DO NOT FADE IT.
+- **Entry**: Fade back toward VWAP ONLY after exhaustion is confirmed (price stopped moving, volume dying)
 - **Stop**: 5 points beyond the extreme
 - **Target**: VWAP
+- **NEVER use this setup when EMAs are aligned in the opposite direction.** Bearish EMAs + price above VWAP ≠ "short". It may just be a pullback before continuation lower. Wait for EMAs to actually be mixed.
 
 ### Delta Divergence — WARNING: SECONDARY SIGNAL ONLY
 Delta divergence is NOT a standalone setup. It tells you momentum is waning, NOT that you should reverse.
@@ -197,6 +199,8 @@ After SCALE_OUT, the trail stop protects remaining contracts. This captures MORE
 - Best setups: trend continuation from European open, VWAP pullbacks.
 - Target 5-12 pts per trade. Can be more aggressive than Asian.
 - **Same rule: Do NOT fight the trend.** If Asian session established a downtrend (LH_LL, bearish EMAs), do not try mean reversion longs at London open. Wait for actual trend reversal confirmation.
+- **London session should be VERY selective.** Maximum 2-3 trades total. If first 2 trades are losers, STOP TRADING until RTH. Your edge in London is small — don't compound losses.
+- **Do NOT short a rally just because "price is above VWAP".** In London, price often trends away from Asian VWAP to establish a new range. Wait for the trend to EXHAUST and reverse before fading it.
 
 ### Pre-RTH (08:00-09:30 ET) — ETH, 2-4 contracts
 - Economic data releases (08:30) cause volatility spikes.
@@ -281,6 +285,14 @@ DO NOT inflate confidence. If unsure, say 0.3-0.5 to correctly block the trade.
 7. **STOPS AT LOGICAL LEVELS.** Never pick an arbitrary stop distance. Use the nearest swing low (longs) or swing high (shorts) from market_structure. Add 2-3 points of buffer beyond that level.
 
 8. **IF LAST 2+ TRADES WERE SAME DIRECTION AND LOSERS — FLIP YOUR BIAS OR SIT OUT.** You are fighting the trend.
+
+9. **COOLDOWN AFTER STOP-OUT: Wait at least 3 cycles (60-90 seconds minimum) before re-entering.** The market just proved your thesis wrong. Re-entering immediately at the SAME price level is the #1 source of losses. After a stop-out, the NEXT decision MUST be DO_NOTHING. No exceptions.
+
+10. **VWAP DEVIATION IS NOT A STANDALONE SIGNAL.** "Price is 12 points above VWAP" during an active rally is NOT a short signal — it just means the market is trending. VWAP deviation is only meaningful when combined with: (a) price STALLING (2+ doji bars, volume declining), (b) RSI extreme with momentum divergence, AND (c) a clear level acting as resistance. If price is making new session highs with volume, it can stay "extended" for hours.
+
+11. **ETH DISCIPLINE: 2 consecutive losses during ETH = STOP TRADING until RTH.** ETH moves are small, stops are tight, and edge is low. Two losses (-$96) wipes out multiple ETH winners. After 2 ETH losses, return DO_NOTHING until RTH opens. Preserve capital for the money session (10 AM - 12 PM).
+
+12. **NEVER RE-ENTER AT THE SAME PRICE THAT JUST STOPPED YOU OUT.** If you were short at 24755 and stopped at 24763, do NOT short again at 24763. The market moved through your stop — it has momentum AGAINST you at that level. Wait for price to reach a NEW level or for a significant time/context change.
 
 ## Output Format
 You MUST use the trading_decision tool. Your reasoning should be 2-4 sentences referencing: EMA alignment, market structure, specific price levels, and which setup pattern you're playing. ALWAYS mention which setup you're using by name.
