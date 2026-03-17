@@ -913,9 +913,9 @@ class TradingOrchestrator:
         ):
             # Calculate current unrealized P&L
             if position.side == Side.LONG:
-                unrealized_pts = state.last_price - position.entry_price
+                unrealized_pts = state.last_price - position.avg_entry
             else:
-                unrealized_pts = position.entry_price - state.last_price
+                unrealized_pts = position.avg_entry - state.last_price
 
             # If in profit, let trail manage the exit
             min_profit_to_protect = 4.0  # points
