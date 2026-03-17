@@ -1304,29 +1304,23 @@ class TradingOrchestrator:
                 f"(max {ctrl.effective_max_contracts} contracts). Don't give back gains."
             )
 
-        # Consecutive losers awareness
+        # Consecutive losers — informational only (guardrails enforce limits)
         losers = ctrl.consecutive_losers
-        if losers >= 3:
+        if losers >= 2:
             parts.append(
-                f"TILT RISK: {losers} consecutive losers. Step back — "
-                f"next entry needs 0.70+ confidence minimum. "
-                f"Consider sitting out for a few cycles."
-            )
-        elif losers >= 2:
-            parts.append(
-                f"CAUTION: {losers} consecutive losers. "
-                f"Be more selective on next entry."
+                f"Note: {losers} consecutive losers. Guardrails are active. "
+                f"Focus on finding the NEXT high-quality setup — do NOT let "
+                f"past losses prevent you from trading when signals align."
             )
 
-        # Trade count awareness
+        # Trade count — informational only
         trades = ctrl.total_trades
-        if trades >= 5:
+        if trades >= 20:
             parts.append(
-                f"OVERTRADING CHECK: {trades} trades today (target: 2-5). "
-                f"Unless this is an exceptional setup, consider DO_NOTHING."
+                f"Trade count: {trades} today — approaching session limit."
             )
 
-        # Win rate context
+        # Win rate context — informational only
         if trades >= 3:
             winners = ctrl.winners
             win_rate = (winners / trades) * 100 if trades > 0 else 0

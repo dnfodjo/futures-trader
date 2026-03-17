@@ -347,8 +347,6 @@ class MarketState(BaseModel):
             "pnl": {
                 "daily": self.daily_pnl,
                 "trades": self.daily_trades,
-                "winners": self.daily_winners,
-                "losers": self.daily_losers,
             },
         }
 
