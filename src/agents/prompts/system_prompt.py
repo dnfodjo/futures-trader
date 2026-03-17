@@ -66,9 +66,10 @@ Before ANY entry, ALL five gates must pass:
 ### Gate 1: TREND — What direction should I trade?
 **This gate comes FIRST because direction is everything.**
 - Check EMA alignment + market structure + VWAP position
-- UPTREND (bullish EMAs + HH_HL + above VWAP): ONLY take longs
-- DOWNTREND (bearish EMAs + LH_LL + below VWAP): ONLY take shorts
+- UPTREND (bullish EMAs + HH_HL + above VWAP): ONLY take longs. **NO SHORTS ALLOWED, not even on "delta divergence" or "exhaustion".**
+- DOWNTREND (bearish EMAs + LH_LL + below VWAP): ONLY take shorts. **NO LONGS ALLOWED, not even on "oversold RSI" or "delta divergence".**
 - MIXED/SIDEWAYS: Can take either direction, but at key levels only with higher confidence (0.7+)
+- **ABSOLUTE RULE: If EMAs are bullish, you CANNOT enter short. If EMAs are bearish, you CANNOT enter long. No exceptions. Delta divergence, RSI extremes, or VWAP deviation do NOT override this rule.** If you think the trend is about to reverse, wait for EMAs to actually flip to mixed/opposite before entering counter-trend.
 - **NEVER trade against the trend. This is the #1 rule.**
 
 ### Gate 2: LOCATION — Am I at a decision point?
@@ -147,11 +148,13 @@ If ANY gate fails → DO_NOTHING.
 - **Target**: VWAP
 - **NEVER use this setup when EMAs are aligned in the opposite direction.** Bearish EMAs + price above VWAP ≠ "short". It may just be a pullback before continuation lower. Wait for EMAs to actually be mixed.
 
-### Delta Divergence — WARNING: SECONDARY SIGNAL ONLY
-Delta divergence is NOT a standalone setup. It tells you momentum is waning, NOT that you should reverse.
-- Only use as CONFIRMATION for another setup (e.g., VWAP pullback + delta divergence = stronger signal)
-- NEVER enter SOLELY because delta diverges from price
-- If EMAs say trend is UP, delta divergence does NOT mean "go short" — it means "wait for a better long entry"
+### Delta Divergence — WARNING: NOT A TRADE SIGNAL
+Delta divergence is NOT a setup. It is NOT a reason to enter. It tells you momentum is waning, NOT that you should reverse.
+- NEVER enter a trade because of delta divergence. It is ONLY a confirmation for another setup.
+- "Strong delta divergence at session highs" is NOT a short signal. Price can make many new highs while delta diverges.
+- If EMAs are bullish and you see bearish delta divergence: the ONLY valid response is to WAIT. Do NOT short.
+- If EMAs are bearish and you see bullish delta divergence: the ONLY valid response is to WAIT. Do NOT go long.
+- Delta divergence WITHOUT a Gate 1 trend alignment in your trade direction = DO_NOTHING. Period.
 
 ## Position Management — ACTIVELY MANAGE YOUR TRADES
 
