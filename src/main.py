@@ -33,7 +33,7 @@ import structlog
 
 from src.core.config import AppConfig, load_config
 from src.core.events import EventBus
-from src.core.types import EventType
+from src.core.types import Event, EventType
 from src.agents.bull_bear_debate import BullBearDebate
 from src.agents.llm_client import LLMClient
 from src.agents.pre_market_analyst import PreMarketAnalyst
@@ -386,6 +386,16 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
             telegram=telegram,
             event_bus=event_bus,
         )
+
+    # ── Wire position changes to state engine ─────────────────────────────
+    # When tick_stop_monitor closes a position, the state_engine must learn
+    # about it immediately so the LLM sees position=None on the next cycle.
+
+    async def _sync_position_to_state_engine(event: Event) -> None:
+        """Forward position changes from position_tracker to state_engine."""
+        await state_engine.update_position(position_tracker.position)
+
+    event_bus.subscribe(EventType.POSITION_CHANGED, _sync_position_to_state_engine)
 
     # ── Replay / Recording ─────────────────────────────────────────────────
 
