@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import structlog
 
+from src.core import clock
 from src.core.types import ActionType, GuardrailResult, LLMAction, MarketState, PositionState
 
 logger = structlog.get_logger()
@@ -30,12 +31,14 @@ class RiskCheckGuardrail:
         self,
         min_stop_distance: float = 3.0,
         max_stop_distance: float = 25.0,
+        max_stop_distance_eth: float = 12.0,
         min_confidence: float = 0.55,
         min_entry_spacing_pts: float = 8.0,
         max_spread_pts: float = 3.0,
     ) -> None:
         self._min_stop_distance = min_stop_distance
         self._max_stop_distance = max_stop_distance
+        self._max_stop_distance_eth = max_stop_distance_eth
         self._min_confidence = min_confidence
         self._min_entry_spacing_pts = min_entry_spacing_pts
         self._max_spread_pts = max_spread_pts
@@ -80,12 +83,20 @@ class RiskCheckGuardrail:
                         f"below minimum {self._min_stop_distance:.1f}pts"
                     ),
                 )
-            if action.stop_distance > self._max_stop_distance:
+            # Use tighter max stop during ETH sessions
+            phase = clock.get_session_phase()
+            effective_max = (
+                self._max_stop_distance_eth
+                if clock.is_eth(phase)
+                else self._max_stop_distance
+            )
+            if action.stop_distance > effective_max:
+                session_label = "ETH" if clock.is_eth(phase) else "RTH"
                 return GuardrailResult(
                     allowed=False,
                     reason=(
                         f"risk_check: stop distance {action.stop_distance:.1f}pts "
-                        f"exceeds maximum {self._max_stop_distance:.1f}pts"
+                        f"exceeds {session_label} maximum {effective_max:.1f}pts"
                     ),
                 )
 

@@ -144,6 +144,17 @@ class TradingConfig(BaseSettings):
     trail_min_move_points: float = 3.0  # only modify stop after 3pt move
     trail_min_interval_sec: float = 10.0
 
+    # ETH (Extended Trading Hours) trail params — tighter for thin liquidity
+    # Asian/London sessions have smaller ranges (5-15pts vs 20-40pts RTH)
+    # so trails must be tighter to avoid giving back all profits
+    eth_trail_distance: float = 5.0  # 5pts vs 8pts RTH
+    eth_trail_activation_points: float = 2.0  # activate trail at 2pts vs 4pts RTH
+    eth_mid_tighten_at_profit: float = 4.0  # mid-tier at 4pts vs 6pts
+    eth_mid_tightened_distance: float = 4.0  # mid distance 4pts vs 6pts
+    eth_tighten_at_profit: float = 8.0  # tight-tier at 8pts vs 12pts
+    eth_tightened_distance: float = 3.0  # tight distance 3pts vs 5pts
+    eth_max_stop_points: float = 12.0  # max 12pt stop during ETH (vs 25pt RTH)
+
     # Stop hunt avoidance
     stop_offset_from_obvious_levels: float = 2.5  # offset stops 2.5pts from round numbers
 

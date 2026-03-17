@@ -56,6 +56,7 @@ class GuardrailEngine:
         max_adds: int = 3,
         min_stop_distance: float = 3.0,
         max_stop_distance: float = 25.0,
+        max_stop_distance_eth: float = 12.0,
         min_confidence: float = 0.3,
         min_entry_spacing_pts: float = 5.0,
         max_consecutive_losers: int = 4,
@@ -80,6 +81,7 @@ class GuardrailEngine:
         self._risk_checks = RiskCheckGuardrail(
             min_stop_distance=min_stop_distance,
             max_stop_distance=max_stop_distance,
+            max_stop_distance_eth=max_stop_distance_eth,
             min_confidence=min_confidence,
             min_entry_spacing_pts=min_entry_spacing_pts,
         )

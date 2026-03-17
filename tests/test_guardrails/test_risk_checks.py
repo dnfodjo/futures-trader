@@ -99,7 +99,7 @@ class TestStopDistance:
         action = _action(stop_distance=30.0)
         result = guard.check(action, _state())
         assert result.allowed is False
-        assert "exceeds maximum" in result.reason
+        assert "exceeds" in result.reason and "maximum" in result.reason
 
     def test_stop_at_minimum(self, guard):
         action = _action(stop_distance=3.0)
@@ -107,7 +107,8 @@ class TestStopDistance:
         assert result.allowed is True
 
     def test_stop_at_maximum(self, guard):
-        action = _action(stop_distance=25.0)
+        # Use 10.0 which is valid in both ETH (max 12) and RTH (max 25)
+        action = _action(stop_distance=10.0)
         result = guard.check(action, _state())
         assert result.allowed is True
 

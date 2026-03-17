@@ -1092,12 +1092,24 @@ class TradingOrchestrator:
                             if isinstance(self._order_manager, QuantLynkOrderManager):
                                 self._order_manager.current_stop_price = stop_price
 
+                        # Detect ETH session for tighter trailing
+                        current_phase = clock.get_session_phase()
+                        is_eth = clock.is_eth(current_phase)
+                        trading_cfg = self._config.trading
+
                         self._tick_stop_monitor.activate(
                             side=new_position.side.value,
                             entry_price=fill_price,
                             stop_price=stop_price,
                             take_profit_price=tp_price,
                             atr=current_atr,
+                            is_eth=is_eth,
+                            eth_trail_distance=trading_cfg.eth_trail_distance,
+                            eth_trail_activation=trading_cfg.eth_trail_activation_points,
+                            eth_mid_tighten_at_profit=trading_cfg.eth_mid_tighten_at_profit,
+                            eth_mid_tightened_distance=trading_cfg.eth_mid_tightened_distance,
+                            eth_tighten_at_profit=trading_cfg.eth_tighten_at_profit,
+                            eth_tightened_distance=trading_cfg.eth_tightened_distance,
                         )
                         logger.info(
                             "orchestrator.tick_stop_monitor_activated",
@@ -1106,6 +1118,7 @@ class TradingOrchestrator:
                             stale_price=last_price,
                             stop=stop_price,
                             take_profit=tp_price,
+                            is_eth=is_eth,
                         )
                 elif action.action in (ActionType.FLATTEN, ActionType.STOP_TRADING):
                     self._tick_stop_monitor.deactivate()

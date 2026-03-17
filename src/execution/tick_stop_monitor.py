@@ -122,6 +122,13 @@ class TickStopMonitor:
         take_profit_price: float = 0.0,
         trail_distance: float = 0.0,
         atr: float = 0.0,
+        is_eth: bool = False,
+        eth_trail_distance: float = 5.0,
+        eth_trail_activation: float = 2.0,
+        eth_mid_tighten_at_profit: float = 4.0,
+        eth_mid_tightened_distance: float = 4.0,
+        eth_tighten_at_profit: float = 8.0,
+        eth_tightened_distance: float = 3.0,
     ) -> None:
         """Activate monitoring for a new position.
 
@@ -132,6 +139,14 @@ class TickStopMonitor:
             take_profit_price: Take-profit price (0 = no TP).
             trail_distance: Override trail distance (0 = use default or ATR-based).
             atr: Current ATR — if provided, trail distance = max(2*ATR, 5.0).
+            is_eth: True during Extended Trading Hours (Asian/London) — uses
+                    tighter trail params since ranges are smaller.
+            eth_trail_distance: Trail distance during ETH (default 5.0).
+            eth_trail_activation: Min profit before trail activates in ETH (default 2.0).
+            eth_mid_tighten_at_profit: Mid-tier profit threshold in ETH.
+            eth_mid_tightened_distance: Mid-tier trail distance in ETH.
+            eth_tighten_at_profit: Tight-tier profit threshold in ETH.
+            eth_tightened_distance: Tight-tier trail distance in ETH.
         """
         self._active = True
         self._side = side.lower()
@@ -145,15 +160,36 @@ class TickStopMonitor:
         self._ticks_processed = 0
         self._activation_time = time.monotonic()
 
-        if trail_distance > 0:
-            self._trail_distance = trail_distance
-        elif atr > 0:
-            # ATR-based trail: 2x ATR, clamped between 5 and 8 points
-            self._trail_distance = round(max(5.0, min(8.0, atr * 2.0)), 1)
-            self._mid_tightened_distance = round(max(4.0, min(6.0, atr * 1.5)), 1)
-            self._tightened_distance = round(max(3.0, min(5.0, atr * 1.2)), 1)
+        # ETH session: override trail params with tighter values
+        if is_eth:
+            self._trail_activation = eth_trail_activation
+            self._mid_tighten_at_profit = eth_mid_tighten_at_profit
+            self._mid_tightened_distance = eth_mid_tightened_distance
+            self._tighten_at_profit = eth_tighten_at_profit
+            self._tightened_distance = eth_tightened_distance
+
+            if trail_distance > 0:
+                self._trail_distance = trail_distance
+            elif atr > 0:
+                # ETH ATR-based: tighter clamps (3-6 instead of 5-8)
+                self._trail_distance = round(max(3.0, min(6.0, atr * 2.0)), 1)
+                self._mid_tightened_distance = round(max(2.5, min(4.0, atr * 1.5)), 1)
+                self._tightened_distance = round(max(2.0, min(3.5, atr * 1.2)), 1)
+            else:
+                self._trail_distance = eth_trail_distance
         else:
-            self._trail_distance = self._default_trail_distance
+            # RTH: restore default activation threshold
+            self._trail_activation = self._trail_activation  # keep constructor default
+
+            if trail_distance > 0:
+                self._trail_distance = trail_distance
+            elif atr > 0:
+                # ATR-based trail: 2x ATR, clamped between 5 and 8 points
+                self._trail_distance = round(max(5.0, min(8.0, atr * 2.0)), 1)
+                self._mid_tightened_distance = round(max(4.0, min(6.0, atr * 1.5)), 1)
+                self._tightened_distance = round(max(3.0, min(5.0, atr * 1.2)), 1)
+            else:
+                self._trail_distance = self._default_trail_distance
 
         logger.info(
             "tick_stop_monitor.activated",
@@ -162,6 +198,8 @@ class TickStopMonitor:
             stop=stop_price,
             take_profit=take_profit_price,
             trail_distance=self._trail_distance,
+            trail_activation=self._trail_activation,
+            is_eth=is_eth,
         )
 
     def deactivate(self) -> None:
