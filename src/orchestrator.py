@@ -901,15 +901,14 @@ class TradingOrchestrator:
                 # Fall through with original reasoner decision
 
         # 4c. Trail protection — don't let LLM flatten winners prematurely
-        # When the trail stop is active and position is profitable, suppress
-        # LLM FLATTEN decisions. Let the trail stop manage the exit to let
-        # winners run. The LLM keeps cutting winners at +3-8pts when the trail
-        # could ride them to +15-20pts.
+        # Two layers of protection:
+        # 1. Time-based: Block flattens in first 60s unless trade is losing
+        # 2. Profit-based: If ANY profit exists, let trail manage the exit
+        # The LLM consistently cuts winners at +1-3pts after 14-17 seconds
+        # when the trail could ride them to +10-20pts.
         if (
             action.action == ActionType.FLATTEN
             and position is not None
-            and self._tick_stop_monitor is not None
-            and self._tick_stop_monitor.is_active
         ):
             # Calculate current unrealized P&L
             if position.side == Side.LONG:
@@ -917,13 +916,35 @@ class TradingOrchestrator:
             else:
                 unrealized_pts = position.avg_entry - state.last_price
 
-            # If in profit, let trail manage the exit
-            min_profit_to_protect = 4.0  # points
-            if unrealized_pts >= min_profit_to_protect:
+            # Layer 1: Time-based minimum hold
+            # Don't flatten in first 60 seconds unless trade is losing (< -2pts)
+            min_hold_sec = 60
+            if (
+                position.time_in_trade_sec < min_hold_sec
+                and unrealized_pts > -2.0
+            ):
+                logger.info(
+                    "orchestrator.min_hold_suppressed_flatten",
+                    time_in_trade=position.time_in_trade_sec,
+                    min_hold=min_hold_sec,
+                    unrealized_pts=round(unrealized_pts, 2),
+                    reasoning=action.reasoning[:80] if action.reasoning else "",
+                    msg="Too early to flatten — minimum hold period not met",
+                )
+                return
+
+            # Layer 2: Trail-based profit protection
+            # If trail is active and position is profitable at all, let trail manage exit
+            if (
+                self._tick_stop_monitor is not None
+                and self._tick_stop_monitor.is_active
+                and unrealized_pts > 0.0
+            ):
                 logger.info(
                     "orchestrator.trail_protection_suppressed_flatten",
                     unrealized_pts=round(unrealized_pts, 2),
                     side=position.side.value,
+                    time_in_trade=position.time_in_trade_sec,
                     reasoning=action.reasoning[:80] if action.reasoning else "",
                     msg="Trail active and profitable — letting trail manage exit",
                 )
