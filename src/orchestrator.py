@@ -900,6 +900,35 @@ class TradingOrchestrator:
                 logger.warning("orchestrator.debate_failed", exc_info=True)
                 # Fall through with original reasoner decision
 
+        # 4c. Trail protection — don't let LLM flatten winners prematurely
+        # When the trail stop is active and position is profitable, suppress
+        # LLM FLATTEN decisions. Let the trail stop manage the exit to let
+        # winners run. The LLM keeps cutting winners at +3-8pts when the trail
+        # could ride them to +15-20pts.
+        if (
+            action.action == ActionType.FLATTEN
+            and position is not None
+            and self._tick_stop_monitor is not None
+            and self._tick_stop_monitor.is_active
+        ):
+            # Calculate current unrealized P&L
+            if position.side == Side.LONG:
+                unrealized_pts = state.last_price - position.entry_price
+            else:
+                unrealized_pts = position.entry_price - state.last_price
+
+            # If in profit, let trail manage the exit
+            min_profit_to_protect = 4.0  # points
+            if unrealized_pts >= min_profit_to_protect:
+                logger.info(
+                    "orchestrator.trail_protection_suppressed_flatten",
+                    unrealized_pts=round(unrealized_pts, 2),
+                    side=position.side.value,
+                    reasoning=action.reasoning[:80] if action.reasoning else "",
+                    msg="Trail active and profitable — letting trail manage exit",
+                )
+                return
+
         # 5. Run through guardrails
         result = self._guardrails.check(
             action=action,
