@@ -89,8 +89,8 @@ class TradingConfig(BaseSettings):
     commission_per_rt: float = 0.86  # Tradovate active plan round trip
 
     # Hard limits (guardrails — LLM CANNOT override)
-    # Apex 50k allows 10 MNQ contracts
-    max_contracts: int = 10
+    # Reduced from 10 to 6 — smaller positions + wider stops = better risk/reward
+    max_contracts: int = 6
     max_daily_loss: float = 400.0
     max_weekly_loss: float = 800.0
     max_monthly_loss: float = 2000.0
@@ -106,7 +106,7 @@ class TradingConfig(BaseSettings):
     pre_market_analysis_time: str = "17:55"  # 5 min before Globex opens
 
     # Max contracts during ETH (overnight) — reduced for thin liquidity
-    max_contracts_eth: int = 4
+    max_contracts_eth: int = 3
 
     # Max trades per 23h session (18:05→16:55)
     # With all sessions (Asian, London, Pre-RTH, RTH, Post-RTH),
@@ -126,10 +126,10 @@ class TradingConfig(BaseSettings):
     llm_failure_max_consecutive: int = 3
 
     # Profit preservation
-    profit_preservation_tier1_pnl: float = 200.0
-    profit_preservation_tier1_max_size: int = 6  # still trade decent size at +$200
-    profit_preservation_tier2_pnl: float = 400.0
-    profit_preservation_tier2_max_size: int = 4  # lock the day but still trade
+    profit_preservation_tier1_pnl: float = 150.0
+    profit_preservation_tier1_max_size: int = 4  # still trade decent size at +$150
+    profit_preservation_tier2_pnl: float = 300.0
+    profit_preservation_tier2_max_size: int = 2  # protect the day with minimal size
 
     # Circuit breakers
     consecutive_red_days_half_size: int = 2

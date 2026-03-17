@@ -54,13 +54,13 @@ class TickStopMonitor:
         self,
         flatten_fn: FlattenFn,
         target_symbol: str = "",
-        trail_distance: float = 8.0,
-        trail_activation_points: float = 4.0,
-        min_stop_distance: float = 3.0,
-        tighten_at_profit: float = 12.0,
+        trail_distance: float = 10.0,
+        trail_activation_points: float = 8.0,
+        min_stop_distance: float = 4.0,
+        tighten_at_profit: float = 20.0,
         tightened_distance: float = 5.0,
-        mid_tighten_at_profit: float = 6.0,
-        mid_tightened_distance: float = 6.0,
+        mid_tighten_at_profit: float = 12.0,
+        mid_tightened_distance: float = 7.0,
     ) -> None:
         """Initialize the tick stop monitor.
 
@@ -105,7 +105,7 @@ class TickStopMonitor:
 
         # Grace period — don't check stops for N seconds after activation.
         # Prevents instant stop-outs from stale entry prices or transient ticks.
-        self._grace_period_sec: float = 1.5
+        self._grace_period_sec: float = 3.0
         self._activation_time: float = 0.0
 
         # Stats
@@ -184,10 +184,11 @@ class TickStopMonitor:
             if trail_distance > 0:
                 self._trail_distance = trail_distance
             elif atr > 0:
-                # ATR-based trail: 2x ATR, clamped between 5 and 8 points
-                self._trail_distance = round(max(5.0, min(8.0, atr * 2.0)), 1)
-                self._mid_tightened_distance = round(max(4.0, min(6.0, atr * 1.5)), 1)
-                self._tightened_distance = round(max(3.0, min(5.0, atr * 1.2)), 1)
+                # ATR-based trail: 2.5x ATR, clamped between 8 and 12 points
+                # Wider trail = more room for trades to develop, fewer premature stops
+                self._trail_distance = round(max(8.0, min(12.0, atr * 2.5)), 1)
+                self._mid_tightened_distance = round(max(5.0, min(8.0, atr * 1.8)), 1)
+                self._tightened_distance = round(max(4.0, min(6.0, atr * 1.3)), 1)
             else:
                 self._trail_distance = self._default_trail_distance
 

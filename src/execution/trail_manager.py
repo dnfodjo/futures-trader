@@ -46,10 +46,10 @@ class TrailManager:
 
     def __init__(
         self,
-        trail_distance: float = 8.0,
+        trail_distance: float = 10.0,
         batch_points: float = 3.0,
-        activation_profit_pts: float = 4.0,
-        tighten_at_pts: float = 15.0,
+        activation_profit_pts: float = 8.0,
+        tighten_at_pts: float = 20.0,
         tighten_distance: float = 5.0,
     ) -> None:
         self._trail_distance = trail_distance

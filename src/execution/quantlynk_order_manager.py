@@ -54,7 +54,7 @@ class QuantLynkOrderManager:
         client: QuantLynkClient,
         event_bus: EventBus,
         symbol: str = "MNQM6",
-        default_stop_distance: float = 10.0,
+        default_stop_distance: float = 12.0,
         point_value: float = 2.0,
         position_tracker: Optional[Any] = None,
     ) -> None:
