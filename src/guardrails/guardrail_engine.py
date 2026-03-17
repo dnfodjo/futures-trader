@@ -54,7 +54,7 @@ class GuardrailEngine:
         event_bus: EventBus,
         max_contracts: int = 6,
         max_adds: int = 3,
-        min_stop_distance: float = 3.0,
+        min_stop_distance: float = 10.0,
         max_stop_distance: float = 25.0,
         max_stop_distance_eth: float = 12.0,
         min_confidence: float = 0.3,

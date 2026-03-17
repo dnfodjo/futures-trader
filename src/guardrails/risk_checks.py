@@ -23,13 +23,13 @@ class RiskCheckGuardrail:
     """Validates trade risk parameters before execution.
 
     Usage:
-        guard = RiskCheckGuardrail(min_stop_distance=3.0)
+        guard = RiskCheckGuardrail(min_stop_distance=10.0)
         result = guard.check(action, state, position)
     """
 
     def __init__(
         self,
-        min_stop_distance: float = 3.0,
+        min_stop_distance: float = 10.0,
         max_stop_distance: float = 25.0,
         max_stop_distance_eth: float = 12.0,
         min_confidence: float = 0.55,
