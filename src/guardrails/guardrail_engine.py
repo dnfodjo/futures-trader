@@ -163,6 +163,8 @@ class GuardrailEngine:
         )
         if not result.allowed:
             return self._record_block(result)
+        if result.modified_quantity is not None:
+            modified_quantity = result.modified_quantity
 
         # 3. Risk checks
         result = self._risk_checks.check(

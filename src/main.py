@@ -434,9 +434,9 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
     # ── Enhanced Execution ───────────────────────────────────────────────
 
     trail_manager = TrailManager(
-        trail_distance=8.0,
+        trail_distance=10.0,
         batch_points=trading.trail_min_move_points,
-        activation_profit_pts=4.0,
+        activation_profit_pts=8.0,
     )
 
     # ── Tick-Level Stop Monitor (QuantLynk only) ────────────────────────
@@ -452,8 +452,8 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         tick_stop_monitor = TickStopMonitor(
             flatten_fn=_tick_flatten,
             target_symbol=config.trading.symbol,
-            trail_distance=8.0,
-            trail_activation_points=4.0,
+            trail_distance=10.0,
+            trail_activation_points=8.0,
             min_stop_distance=4.0,
         )
 
