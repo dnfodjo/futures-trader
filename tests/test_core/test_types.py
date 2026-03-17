@@ -331,7 +331,7 @@ class TestMarketStateToLLMDict:
         state = MarketState(last_price=19850.0)
         d = state.to_llm_dict()
         assert d["price"]["last"] == 19850.0
-        assert "position" not in d
+        assert d["position"] == "FLAT"
         assert "upcoming_events" not in d
         assert "in_blackout" not in d
 

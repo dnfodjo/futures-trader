@@ -648,6 +648,23 @@ class TradingOrchestrator:
             if isinstance(self._order_manager, QuantLynkOrderManager):
                 self._order_manager.current_stop_price = None
 
+            # Inject synthetic decision memory so LLM knows position was closed
+            # Without this, the LLM sees old "ENTER" in decision memory and
+            # assumes the position is still open, causing ghost SCALE_OUT.
+            from src.agents.reasoner import DecisionMemory
+
+            pnl_str = f"+${last_trade.pnl:.0f}" if last_trade and last_trade.pnl >= 0 else f"-${abs(last_trade.pnl):.0f}" if last_trade else ""
+            self._reasoner._recent_decisions.append(
+                DecisionMemory(
+                    timestamp=time.time(),
+                    action="POSITION_CLOSED_BY_TRAIL_STOP",
+                    confidence=1.0,
+                    reasoning=f"Trail stop closed position at {trigger_price:.2f} ({pnl_str}). You are now FLAT — no open position.",
+                    price=trigger_price,
+                    model="system",
+                )
+            )
+
             return
 
         # 2-pre-backup. QuantLynk software stop check (backup — if tick monitor

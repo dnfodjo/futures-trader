@@ -436,7 +436,7 @@ class MarketState(BaseModel):
         if cm_filtered:
             d["cross_market"] = cm_filtered
 
-        # Position (only if we have one)
+        # Position — ALWAYS include so LLM knows definitively if flat or not
         if self.position is not None:
             d["position"] = {
                 "side": self.position.side.value,
@@ -449,6 +449,8 @@ class MarketState(BaseModel):
                 "max_adverse": self.position.max_adverse,
                 "adds": self.position.adds_count,
             }
+        else:
+            d["position"] = "FLAT"
 
         # Upcoming events (only if present)
         if self.upcoming_events:
