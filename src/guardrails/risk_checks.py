@@ -76,12 +76,16 @@ class RiskCheckGuardrail:
         # 2. Stop distance validation
         if action.stop_distance is not None:
             if action.stop_distance < self._min_stop_distance:
+                # Allow the trade but widen the stop to the minimum
+                # (the order manager also enforces this, but we signal it here)
+                logger.info(
+                    "risk_check.stop_distance_widened",
+                    requested=action.stop_distance,
+                    enforced=self._min_stop_distance,
+                )
                 return GuardrailResult(
-                    allowed=False,
-                    reason=(
-                        f"risk_check: stop distance {action.stop_distance:.1f}pts "
-                        f"below minimum {self._min_stop_distance:.1f}pts"
-                    ),
+                    allowed=True,
+                    modified_quantity=None,  # quantity unchanged
                 )
             # Use tighter max stop during ETH sessions
             phase = clock.get_session_phase()

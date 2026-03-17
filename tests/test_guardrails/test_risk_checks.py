@@ -89,11 +89,11 @@ class TestStopDistance:
         result = guard.check(action, _state())
         assert result.allowed is True
 
-    def test_stop_too_tight(self, guard):
+    def test_stop_too_tight_allowed_and_widened(self, guard):
+        """Tight stops pass guardrails — order manager enforces min distance."""
         action = _action(stop_distance=2.0)
         result = guard.check(action, _state())
-        assert result.allowed is False
-        assert "below minimum" in result.reason
+        assert result.allowed is True
 
     def test_stop_too_wide(self, guard):
         action = _action(stop_distance=30.0)

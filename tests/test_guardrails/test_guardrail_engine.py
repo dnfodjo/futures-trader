@@ -185,13 +185,13 @@ class TestBlocked:
         assert result.allowed is False
         assert "confidence" in result.reason
 
-    def test_blocked_by_tight_stop(self, engine):
+    def test_tight_stop_widened_not_blocked(self, engine):
+        """Tight stops are allowed — order manager enforces minimum distance."""
         result = engine.check(
             _action(ActionType.ENTER, stop_distance=1.0),
             _state(),
         )
-        assert result.allowed is False
-        assert "stop distance" in result.reason
+        assert result.allowed is True
 
     def test_blocked_by_wide_spread(self, engine):
         result = engine.check(
