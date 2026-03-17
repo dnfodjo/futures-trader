@@ -136,6 +136,20 @@ class SessionRuleGuardrail:
                 ),
             )
 
+        # 5b. ETH hard stop: 2+ consecutive losers during ETH = no more entries until RTH
+        if (
+            consecutive_losers >= 2
+            and hasattr(state, "session_phase")
+            and state.session_phase in self._ETH_PHASES
+        ):
+            return GuardrailResult(
+                allowed=False,
+                reason=(
+                    f"session_rule: ETH trading halted — {consecutive_losers} consecutive "
+                    f"losers during {state.session_phase.value}. Wait for RTH."
+                ),
+            )
+
         # 6. ETH max contracts cap — hard limit during extended hours
         if (
             action.action == ActionType.ENTER
