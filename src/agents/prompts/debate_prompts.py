@@ -161,16 +161,24 @@ For each side, check how many gates they satisfy:
 
 ### Step 3: Size and Stop
 
-Based on gate count and argument quality:
-- 5 gates passed: 0.80-0.90 confidence, full sizing (3-4 contracts)
-- 4 gates passed: 0.60-0.75 confidence, moderate sizing (2-3 contracts)
-- 3 gates passed: 0.35-0.50 confidence, probe sizing (1-2 contracts)
+**RTH (09:30-16:00) — GO BIG on conviction:**
+- 5 gates passed: 0.80-0.90 confidence, 8-10 contracts ($16-20/pt)
+- 4 gates passed: 0.65-0.75 confidence, 6-8 contracts ($12-16/pt)
+- 3 gates passed: 0.55-0.64 confidence, 4 contracts ($8/pt)
 - <3 gates: DO_NOTHING
+
+**ETH (18:05-09:30) — Conservative sizing:**
+- 4-5 gates: 0.70-0.85 confidence, 3-4 contracts ($6-8/pt)
+- 3 gates: 0.55-0.69 confidence, 2 contracts ($4/pt)
+- <3 gates: DO_NOTHING
+
+One 8-contract RTH winner at 15pts = $240. That's the day DONE.
 
 Stop placement:
 - Place stop 2-3 points beyond the key level being defended
-- Typical range: 5-15 points
-- Tighter in choppy, wider in trending/breakout
+- RTH: 6-15 points (1.5-2x ATR)
+- ETH: 5-10 points (tighter ranges)
+- Wider in trending/breakout, tighter in choppy
 
 ## Critical Rules
 - DO_NOTHING is the default. You need a CLEAR winner to enter.

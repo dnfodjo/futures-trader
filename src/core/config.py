@@ -89,7 +89,8 @@ class TradingConfig(BaseSettings):
     commission_per_rt: float = 0.86  # Tradovate active plan round trip
 
     # Hard limits (guardrails — LLM CANNOT override)
-    max_contracts: int = 6
+    # Apex 50k allows 10 MNQ contracts
+    max_contracts: int = 10
     max_daily_loss: float = 400.0
     max_weekly_loss: float = 800.0
     max_monthly_loss: float = 2000.0
@@ -105,7 +106,7 @@ class TradingConfig(BaseSettings):
     pre_market_analysis_time: str = "17:55"  # 5 min before Globex opens
 
     # Max contracts during ETH (overnight) — reduced for thin liquidity
-    max_contracts_eth: int = 2
+    max_contracts_eth: int = 4
 
     # Max trades per 23h session (18:05→16:55)
     # With all sessions (Asian, London, Pre-RTH, RTH, Post-RTH),
@@ -126,9 +127,9 @@ class TradingConfig(BaseSettings):
 
     # Profit preservation
     profit_preservation_tier1_pnl: float = 200.0
-    profit_preservation_tier1_max_size: int = 3
+    profit_preservation_tier1_max_size: int = 6  # still trade decent size at +$200
     profit_preservation_tier2_pnl: float = 400.0
-    profit_preservation_tier2_max_size: int = 2
+    profit_preservation_tier2_max_size: int = 4  # lock the day but still trade
 
     # Circuit breakers
     consecutive_red_days_half_size: int = 2
@@ -144,15 +145,17 @@ class TradingConfig(BaseSettings):
     trail_min_move_points: float = 3.0  # only modify stop after 3pt move
     trail_min_interval_sec: float = 10.0
 
-    # ETH (Extended Trading Hours) trail params — tighter for thin liquidity
-    # Asian/London sessions have smaller ranges (5-15pts vs 20-40pts RTH)
-    # so trails must be tighter to avoid giving back all profits
-    eth_trail_distance: float = 5.0  # 5pts vs 8pts RTH
-    eth_trail_activation_points: float = 2.0  # activate trail at 2pts vs 4pts RTH
-    eth_mid_tighten_at_profit: float = 4.0  # mid-tier at 4pts vs 6pts
-    eth_mid_tightened_distance: float = 4.0  # mid distance 4pts vs 6pts
-    eth_tighten_at_profit: float = 8.0  # tight-tier at 8pts vs 12pts
-    eth_tightened_distance: float = 3.0  # tight distance 3pts vs 5pts
+    # ETH (Extended Trading Hours) trail params — balanced for thin liquidity
+    # Key insight: trail distance must be SMALLER than typical move or we
+    # give back all profits. Asian moves are 8-15pts, London 10-20pts.
+    # Trail = 6pts means we keep 2-14pts of an 8-20pt move (vs 0-7pts with 5pt trail).
+    # Initial stop at 6pts risks $24/trade (2 contracts) — acceptable.
+    eth_trail_distance: float = 6.0  # 6pts (keep more of 8-15pt ETH moves)
+    eth_trail_activation_points: float = 3.0  # activate at 3pts (not too early)
+    eth_mid_tighten_at_profit: float = 6.0  # mid-tier at 6pts profit
+    eth_mid_tightened_distance: float = 5.0  # mid distance 5pts (lock 1pt+)
+    eth_tighten_at_profit: float = 10.0  # tight-tier at 10pts profit
+    eth_tightened_distance: float = 4.0  # tight distance 4pts (lock 6pt+)
     eth_max_stop_points: float = 12.0  # max 12pt stop during ETH (vs 25pt RTH)
 
     # Stop hunt avoidance
