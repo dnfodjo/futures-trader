@@ -11,7 +11,10 @@ Pure Python logic (no LLM calls). Responsible for:
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Optional
 
 import structlog
@@ -19,6 +22,9 @@ import structlog
 from src.core.types import TradeRecord
 
 logger = structlog.get_logger()
+
+# File to persist session state across restarts
+_STATE_FILE = "data/session_state.json"
 
 
 class SessionController:
@@ -79,24 +85,91 @@ class SessionController:
     # ── Session Lifecycle ────────────────────────────────────────────────────
 
     def start_session(self, date_str: str = "") -> None:
-        """Start a new trading session. Resets all daily stats."""
-        self._session_date = date_str or datetime.now(tz=UTC).strftime("%Y-%m-%d")
-        self._daily_pnl = 0.0
-        self._gross_pnl = 0.0
-        self._commissions = 0.0
-        self._partial_pnl_accumulated = 0.0
-        self._trades.clear()
-        self._winners = 0
-        self._losers = 0
-        self._scratches = 0
-        self._consecutive_losers = 0
-        self._max_consecutive_losers = 0
-        self._peak_pnl = 0.0
-        self._max_drawdown = 0.0
-        self._is_stopped = False
-        self._stop_reason = ""
+        """Start a new trading session.
 
-        logger.info("session_controller.started", date=self._session_date)
+        If a saved state exists for TODAY, restore it (surviving restarts).
+        If the saved state is from a different day, start fresh.
+        """
+        today = date_str or datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        self._session_date = today
+
+        # Try to restore state from disk (survives restarts within same day)
+        restored = self._load_state()
+        if restored and restored.get("session_date") == today:
+            self._daily_pnl = restored.get("daily_pnl", 0.0)
+            self._gross_pnl = restored.get("gross_pnl", 0.0)
+            self._commissions = restored.get("commissions", 0.0)
+            self._partial_pnl_accumulated = restored.get("partial_pnl", 0.0)
+            self._winners = restored.get("winners", 0)
+            self._losers = restored.get("losers", 0)
+            self._scratches = restored.get("scratches", 0)
+            self._consecutive_losers = restored.get("consecutive_losers", 0)
+            self._max_consecutive_losers = restored.get("max_consecutive_losers", 0)
+            self._peak_pnl = restored.get("peak_pnl", 0.0)
+            self._max_drawdown = restored.get("max_drawdown", 0.0)
+            self._is_stopped = restored.get("is_stopped", False)
+            self._stop_reason = restored.get("stop_reason", "")
+            self._trades.clear()  # trades list not persisted (too large)
+            logger.info(
+                "session_controller.restored_from_disk",
+                date=today,
+                daily_pnl=self._daily_pnl,
+                trades=self._winners + self._losers + self._scratches,
+                consecutive_losers=self._consecutive_losers,
+            )
+        else:
+            # Fresh session (new day or no saved state)
+            self._daily_pnl = 0.0
+            self._gross_pnl = 0.0
+            self._commissions = 0.0
+            self._partial_pnl_accumulated = 0.0
+            self._trades.clear()
+            self._winners = 0
+            self._losers = 0
+            self._scratches = 0
+            self._consecutive_losers = 0
+            self._max_consecutive_losers = 0
+            self._peak_pnl = 0.0
+            self._max_drawdown = 0.0
+            self._is_stopped = False
+            self._stop_reason = ""
+            logger.info("session_controller.started", date=self._session_date)
+
+    def _save_state(self) -> None:
+        """Persist session state to disk so it survives restarts."""
+        state = {
+            "session_date": self._session_date,
+            "daily_pnl": self._daily_pnl,
+            "gross_pnl": self._gross_pnl,
+            "commissions": self._commissions,
+            "partial_pnl": self._partial_pnl_accumulated,
+            "winners": self._winners,
+            "losers": self._losers,
+            "scratches": self._scratches,
+            "consecutive_losers": self._consecutive_losers,
+            "max_consecutive_losers": self._max_consecutive_losers,
+            "peak_pnl": self._peak_pnl,
+            "max_drawdown": self._max_drawdown,
+            "is_stopped": self._is_stopped,
+            "stop_reason": self._stop_reason,
+            "saved_at": datetime.now(tz=UTC).isoformat(),
+        }
+        try:
+            Path(_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+            with open(_STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception:
+            logger.warning("session_controller.save_state_failed", exc_info=True)
+
+    def _load_state(self) -> Optional[dict]:
+        """Load persisted session state from disk."""
+        try:
+            if os.path.exists(_STATE_FILE):
+                with open(_STATE_FILE) as f:
+                    return json.load(f)
+        except Exception:
+            logger.warning("session_controller.load_state_failed", exc_info=True)
+        return None
 
     # ── Trade Recording ──────────────────────────────────────────────────────
 
@@ -192,6 +265,9 @@ class SessionController:
             trades=len(self._trades),
             wl=f"{self._winners}W/{self._losers}L",
         )
+
+        # Persist state to disk after every trade (survives restarts)
+        self._save_state()
 
     def _check_stop_conditions(self) -> None:
         """Check if any stop trading conditions are met."""

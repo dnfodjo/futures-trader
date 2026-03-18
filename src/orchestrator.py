@@ -955,7 +955,23 @@ class TradingOrchestrator:
                 )
                 return
 
-        # 4c2. Consecutive same-direction loss block — after 2 losses in the
+        # 4c2. Hard cap on entry size — the LLM requests 4 contracts even when
+        # the prompt says 2-3.  Cap at 2 for ANY single entry.  This means:
+        # - 2 contracts × 10pt stop = $40 risk per trade (manageable)
+        # - 4 contracts × 10pt stop = $80 risk per trade (too much on marginal setups)
+        # The guardrails handle max POSITION size; this handles max ENTRY size.
+        if action.action == ActionType.ENTER and action.quantity is not None:
+            max_entry = 2  # hard cap: never enter more than 2 contracts at once
+            if action.quantity > max_entry:
+                logger.info(
+                    "orchestrator.entry_size_capped",
+                    requested=action.quantity,
+                    capped_to=max_entry,
+                    msg=f"Entry size capped from {action.quantity} to {max_entry} contracts",
+                )
+                action = action.model_copy(update={"quantity": max_entry})
+
+        # 4c2b. Consecutive same-direction loss block — after 2 losses in the
         # SAME direction, block that direction.  This prevents the pattern:
         # "short, stopped, short again, stopped again" = instant -$180.
         if (

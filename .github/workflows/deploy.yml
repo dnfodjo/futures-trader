@@ -1,8 +1,10 @@
 name: Deploy to VPS
 
 on:
-  push:
-    branches: [main]
+  # Auto-deploy on push DISABLED — causes double restarts when also deploying manually.
+  # Use workflow_dispatch (manual trigger from GitHub UI) instead.
+  # push:
+  #   branches: [main]
   workflow_dispatch:  # Manual trigger from GitHub UI
 
 # Only one deploy at a time
