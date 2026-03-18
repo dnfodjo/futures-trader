@@ -23,8 +23,9 @@ from src.core.types import TradeRecord
 
 logger = structlog.get_logger()
 
-# File to persist session state across restarts
-_STATE_FILE = "data/session_state.json"
+# File to persist session state across restarts.
+# Use absolute path relative to this file's location to avoid CWD issues.
+_STATE_FILE = str(Path(__file__).resolve().parent.parent.parent / "data" / "session_state.json")
 
 
 class SessionController:
@@ -166,9 +167,25 @@ class SessionController:
         try:
             if os.path.exists(_STATE_FILE):
                 with open(_STATE_FILE) as f:
-                    return json.load(f)
+                    data = json.load(f)
+                logger.info(
+                    "session_controller.state_file_loaded",
+                    path=_STATE_FILE,
+                    session_date=data.get("session_date"),
+                    daily_pnl=data.get("daily_pnl"),
+                )
+                return data
+            else:
+                logger.info(
+                    "session_controller.no_state_file",
+                    path=_STATE_FILE,
+                )
         except Exception:
-            logger.warning("session_controller.load_state_failed", exc_info=True)
+            logger.warning(
+                "session_controller.load_state_failed",
+                path=_STATE_FILE,
+                exc_info=True,
+            )
         return None
 
     # ── Trade Recording ──────────────────────────────────────────────────────

@@ -755,6 +755,24 @@ class TradingOrchestrator:
                 # Skip the LLM call entirely — save cost and avoid bad entries
                 return
 
+        # 2b-pre2. Warm-up period after startup — EMAs need ~90 seconds of data
+        # to become meaningful. Without this, the system trades on garbage EMAs
+        # immediately after restart, leading to wrong-direction entries.
+        # Only block new entries (not position management).
+        if position is None and self._start_time is not None:
+            warmup_sec = 90  # 90 seconds for EMAs to populate
+            uptime = time.monotonic() - self._start_time
+            if uptime < warmup_sec:
+                remaining = int(warmup_sec - uptime)
+                if self._decisions_made < 2:  # Only log first couple times
+                    logger.info(
+                        "orchestrator.warmup_active",
+                        uptime_sec=int(uptime),
+                        remaining_sec=remaining,
+                        msg=f"WARM-UP: {remaining}s remaining — collecting EMA/indicator data before trading",
+                    )
+                return
+
         # 2a2. Post-stopout cooldown — 3 MINUTES after any losing exit.
         # This is the #1 cause of blowing up: getting stopped out, then
         # immediately re-entering because the LLM thinks "the setup is still good."
@@ -1051,9 +1069,13 @@ class TradingOrchestrator:
                     )
                     return
 
-        # 4d2. RSI extreme guard — HARD block on overbought/oversold entries
-        # The prompt tells the LLM "don't enter longs if RSI > 70" but LLMs
-        # regularly ignore this. Enforce it deterministically.
+        # 4d2. RSI extreme guard — block COUNTER-TREND entries at RSI extremes.
+        # Key insight: RSI < 30 is NORMAL during strong downtrends. Blocking shorts
+        # at RSI < 30 prevented the system from trading the biggest down moves.
+        # Now: only block entries that go AGAINST the trend at RSI extremes.
+        # - RSI > 70 + LONG = blocked (buying overbought — likely to reverse)
+        # - RSI < 30 + SHORT + bearish EMAs = ALLOWED (trend-following into selloff)
+        # - RSI < 30 + SHORT + mixed/bullish EMAs = blocked (fading at oversold)
         if action.action == ActionType.ENTER and action.side is not None:
             rsi = state.rsi
             if rsi is not None and rsi > 0:
@@ -1066,13 +1088,27 @@ class TradingOrchestrator:
                     )
                     return
                 if action.side == Side.SHORT and rsi < 30:
-                    logger.warning(
-                        "orchestrator.rsi_guard_blocked",
-                        side="short",
-                        rsi=round(rsi, 1),
-                        msg="BLOCKED: Cannot enter short when RSI < 30 (oversold)",
-                    )
-                    return
+                    # Check if EMAs are bearish — if so, allow the short
+                    emas = state.emas
+                    ema_align = emas.get("alignment", "mixed")
+                    if ema_align in ("bearish", "bearish_partial"):
+                        logger.info(
+                            "orchestrator.rsi_oversold_trend_allowed",
+                            side="short",
+                            rsi=round(rsi, 1),
+                            ema_alignment=ema_align,
+                            msg="RSI oversold but EMAs bearish — trend-following short ALLOWED",
+                        )
+                        # Don't block — allow the trade
+                    else:
+                        logger.warning(
+                            "orchestrator.rsi_guard_blocked",
+                            side="short",
+                            rsi=round(rsi, 1),
+                            ema_alignment=ema_align,
+                            msg="BLOCKED: Cannot enter short when RSI < 30 and EMAs not bearish",
+                        )
+                        return
 
         # 4d3. VWAP extension guard — REMOVED
         # The old 12pt limit blocked all trend day entries. On a 100pt trend day,
