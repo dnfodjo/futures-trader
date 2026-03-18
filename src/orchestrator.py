@@ -827,6 +827,7 @@ class TradingOrchestrator:
 
         # 4a. Bull/bear debate for ENTER decisions (higher quality entries)
         if action.action == ActionType.ENTER and self._debate:
+            reasoner_action = action  # preserve original reasoner decision
             try:
                 debate_result = await self._debate.quick_decide(
                     state,
@@ -845,9 +846,42 @@ class TradingOrchestrator:
                     latency_ms=debate_result.total_latency_ms,
                 )
 
-                # If debate says DO_NOTHING, respect it
+                # If debate says DO_NOTHING, check if reasoner had a strong
+                # trend-aligned entry. If so, override the debate and go with
+                # the reasoner. The debate LLM is too conservative during ETH
+                # and blocks every single entry.
                 if action.action == ActionType.DO_NOTHING:
-                    return
+                    emas = state.emas
+                    ema9 = emas.get("ema_9", 0.0)
+                    ema21 = emas.get("ema_21", 0.0)
+                    ema50 = emas.get("ema_50", 0.0)
+                    emas_aligned = (
+                        ema9 > 0 and ema21 > 0 and ema50 > 0
+                        and (
+                            (ema9 > ema21 - 0.5 and ema21 > ema50 - 0.5  # bullish
+                             and reasoner_action.side == Side.LONG)
+                            or
+                            (ema9 < ema21 + 0.5 and ema21 < ema50 + 0.5  # bearish
+                             and reasoner_action.side == Side.SHORT)
+                        )
+                    )
+
+                    if (
+                        reasoner_action.confidence >= 0.60
+                        and emas_aligned
+                    ):
+                        logger.info(
+                            "orchestrator.debate_overridden",
+                            reasoner_action=reasoner_action.action.value,
+                            reasoner_confidence=reasoner_action.confidence,
+                            reasoner_side=reasoner_action.side.value if reasoner_action.side else None,
+                            debate_action="DO_NOTHING",
+                            debate_confidence=action.confidence,
+                            msg="Reasoner trend-aligned entry overrides cautious debate",
+                        )
+                        action = reasoner_action
+                    else:
+                        return
 
                 # 4b. Stop-breach check: After debate (which takes 9-12s),
                 # check if the live price has moved significantly against our
