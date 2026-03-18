@@ -202,6 +202,15 @@ class TradingOrchestrator:
         self._thesis_tracker: list[dict] = []  # pending thesis checks
         self._thesis_results: list[dict] = []  # completed thesis outcomes
         self._consecutive_errors: int = 0
+
+        # ── Post-stopout cooldown ────────────────────────────────────────
+        # After any stop-out, enforce a 3-minute cooldown before re-entry.
+        # This prevents revenge trading (the #1 cause of blowing up).
+        self._last_exit_time: float = 0.0  # monotonic time of last exit
+        self._last_exit_side: Optional[Side] = None  # direction of last exited trade
+        self._last_exit_was_loss: bool = False  # was the last exit a loss?
+        self._consecutive_same_dir_losses: int = 0  # consecutive losses in same direction
+        self._last_loss_side: Optional[Side] = None  # direction of consecutive losses
         self._max_consecutive_errors: int = 3  # kill switch threshold
         self._start_time: Optional[float] = None
 
@@ -639,6 +648,21 @@ class TradingOrchestrator:
                 except Exception:
                     logger.warning("orchestrator.tick_monitor_notification_failed", exc_info=True)
 
+            # Track cooldown state for post-stopout protection
+            self._last_exit_time = time.monotonic()
+            self._last_exit_side = position.side
+            if last_trade and last_trade.pnl < 0:
+                self._last_exit_was_loss = True
+                if self._last_loss_side == position.side:
+                    self._consecutive_same_dir_losses += 1
+                else:
+                    self._consecutive_same_dir_losses = 1
+                    self._last_loss_side = position.side
+            else:
+                self._last_exit_was_loss = False
+                self._consecutive_same_dir_losses = 0
+                self._last_loss_side = None
+
             # Deactivate monitors
             self._tick_stop_monitor.deactivate()
             if self._trail_manager and self._trail_manager.is_active:
@@ -729,6 +753,23 @@ class TradingOrchestrator:
             current_phase = clock.get_session_phase()
             if current_phase == SessionPhase.ASIAN:
                 # Skip the LLM call entirely — save cost and avoid bad entries
+                return
+
+        # 2a2. Post-stopout cooldown — 3 MINUTES after any losing exit.
+        # This is the #1 cause of blowing up: getting stopped out, then
+        # immediately re-entering because the LLM thinks "the setup is still good."
+        # NO. Wait 3 minutes for the dust to settle.
+        if position is None and self._last_exit_was_loss:
+            cooldown_sec = 180  # 3 minutes
+            elapsed = time.monotonic() - self._last_exit_time
+            if elapsed < cooldown_sec:
+                remaining = int(cooldown_sec - elapsed)
+                logger.info(
+                    "orchestrator.cooldown_active",
+                    remaining_sec=remaining,
+                    last_exit_side=self._last_exit_side.value if self._last_exit_side else "none",
+                    msg=f"POST-STOPOUT COOLDOWN: {remaining}s remaining — no entries allowed",
+                )
                 return
 
         # 2b. Run setup detector and price action analyzer (pre-processing)
@@ -914,6 +955,24 @@ class TradingOrchestrator:
                 )
                 return
 
+        # 4c2. Consecutive same-direction loss block — after 2 losses in the
+        # SAME direction, block that direction.  This prevents the pattern:
+        # "short, stopped, short again, stopped again" = instant -$180.
+        if (
+            action.action == ActionType.ENTER
+            and action.side is not None
+            and self._consecutive_same_dir_losses >= 2
+            and self._last_loss_side is not None
+            and action.side == self._last_loss_side
+        ):
+            logger.warning(
+                "orchestrator.consecutive_loss_direction_blocked",
+                blocked_side=self._last_loss_side.value,
+                consecutive=self._consecutive_same_dir_losses,
+                msg=f"BLOCKED: {self._consecutive_same_dir_losses} consecutive {self._last_loss_side.value} losses — that direction is blocked",
+            )
+            return
+
         # 4d. Regime-aware trend guard — blocks counter-trend UNLESS conditions
         # justify it (extended from VWAP, EMAs flat/crossing, or high confidence).
         # The old rigid guard blocked ALL counter-trend entries, which meant:
@@ -941,12 +1000,13 @@ class TradingOrchestrator:
 
                 # Allow counter-trend when:
                 # 1. EMAs are flat/crossing (spread < 5pts) — no clear trend
-                # 2. Price >20pts from VWAP — mean reversion opportunity
-                # 3. High confidence (0.70+) — LLM sees something strong
+                # 2. Price >25pts from VWAP — extreme mean reversion opportunity
+                # NOTE: Confidence override REMOVED. LLM gives 0.75 on garbage
+                # trades — it cannot be trusted to self-rate. The trend guard
+                # must be deterministic.
                 allow_counter = (
                     not strong_trend  # EMAs are flat/crossing
-                    or vwap_extension > 20.0  # extended — mean reversion OK
-                    or action.confidence >= 0.70  # high conviction override
+                    or vwap_extension > 25.0  # extreme extension — mean reversion OK
                 )
 
                 if bullish and action.side == Side.SHORT and not allow_counter:
@@ -1353,7 +1413,7 @@ class TradingOrchestrator:
                         except Exception:
                             logger.warning("orchestrator.session_stats_sync_failed", exc_info=True)
 
-            # 7c. Post-trade thesis tracking: record exit for monitoring
+            # 7c. Post-trade thesis tracking + cooldown state
             if action.action == ActionType.FLATTEN:
                 last_trade = self._position_tracker.last_trade
                 if last_trade and last_trade.pnl is not None:
@@ -1366,6 +1426,21 @@ class TradingOrchestrator:
                         "reasoning": last_trade.reasoning_entry,
                         "check_after_sec": 300,  # check 5 min after exit
                     })
+
+                    # Track cooldown state for post-stopout protection
+                    self._last_exit_time = time.monotonic()
+                    self._last_exit_side = last_trade.side
+                    if last_trade.pnl < 0:
+                        self._last_exit_was_loss = True
+                        if self._last_loss_side == last_trade.side:
+                            self._consecutive_same_dir_losses += 1
+                        else:
+                            self._consecutive_same_dir_losses = 1
+                            self._last_loss_side = last_trade.side
+                    else:
+                        self._last_exit_was_loss = False
+                        self._consecutive_same_dir_losses = 0
+                        self._last_loss_side = None
 
             # 7d. Record level interaction for Reasoner memory
             self._record_level_interaction(action, state)
