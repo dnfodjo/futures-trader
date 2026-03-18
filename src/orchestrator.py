@@ -900,6 +900,22 @@ class TradingOrchestrator:
         # Reasoner decision goes straight to guardrails.
         # (debate code removed — guardrails provide sufficient filtering)
 
+        # 4b2. Suppress LLM MOVE_STOP when tick_stop_monitor is active.
+        # The tick monitor manages the stop on every tick (~50-200/sec) via
+        # trailing logic. The LLM's MOVE_STOP fires every 15s and conflicts
+        # with the trail — causing the stop to ping-pong. When the tick
+        # monitor is active, it OWNS the stop. LLM exits via FLATTEN only.
+        if (
+            action.action == ActionType.MOVE_STOP
+            and self._tick_stop_monitor is not None
+            and self._tick_stop_monitor.is_active
+        ):
+            logger.debug(
+                "orchestrator.move_stop_suppressed",
+                msg="Tick stop monitor active — trail manages the stop",
+            )
+            return
+
         # 4c. Position protection — don't let LLM cut winners short
         # Three layers:
         # 1. Time-based: Block flattens in first 180s unless trade is losing badly
@@ -916,13 +932,14 @@ class TradingOrchestrator:
                 unrealized_pts = position.avg_entry - state.last_price
 
             # Layer 1: Time-based minimum hold — 3 MINUTES
-            # Don't flatten in first 180s unless trade is losing badly (< -5pts)
-            # The LLM cuts winners at +2-4pts after 15-30 seconds.
-            # 3 minutes gives the trade time to develop.
+            # Don't flatten in first 180s unless trade is losing badly (< -8pts)
+            # The LLM panic-flattened a 15-second trade at -5.5pts (trade #5 today).
+            # That's normal noise — 5pts is a 1-second MNQ move in a fast market.
+            # -8pts ($32 on 2 contracts) gives proper room to develop.
             min_hold_sec = 180
             if (
                 position.time_in_trade_sec < min_hold_sec
-                and unrealized_pts > -5.0
+                and unrealized_pts > -8.0
             ):
                 logger.info(
                     "orchestrator.min_hold_suppressed_flatten",

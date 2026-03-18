@@ -453,8 +453,12 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
             flatten_fn=_tick_flatten,
             target_symbol=config.trading.symbol,
             trail_distance=10.0,
-            trail_activation_points=8.0,
-            min_stop_distance=4.0,
+            trail_activation_points=10.0,    # was 8 — wait for solid profit before trailing
+            min_stop_distance=5.0,           # was 4 — never trail closer than 5pts
+            tighten_at_profit=20.0,          # tight tier at 20pt profit
+            tightened_distance=5.0,          # 5pt trail when in big profit
+            mid_tighten_at_profit=12.0,      # mid tier at 12pt profit
+            mid_tightened_distance=7.0,      # 7pt trail at moderate profit
         )
 
     bull_bear_debate = BullBearDebate(llm_client=llm_client)

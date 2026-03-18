@@ -178,18 +178,18 @@ Do NOT rush to scale out. Let winners run. Only scale out when:
 
 After SCALE_OUT, let the trail stop protect remaining contracts for the big move.
 
-### MOVE_STOP — Give trades ROOM to work
-- At +8 pts profit: MOVE_STOP to breakeven (entry price). NOT before.
-- At +12 pts: MOVE_STOP to lock in +4 pts
-- At +20 pts: MOVE_STOP to +12 pts
-- CRITICAL: Do NOT move stop too tight too early. Trades need room to breathe.
-- Always place the stop at a LOGICAL level (swing low/high), not an arbitrary number
+### MOVE_STOP — DISABLED (trail manages stops automatically)
+- **Do NOT send MOVE_STOP.** The tick-level trailing stop manages the stop on every trade tick.
+- The trail activates at +10 pts profit and tightens progressively.
+- Your job: decide WHEN to enter and WHEN to flatten. The trail protects profits.
+- If you want to exit, use FLATTEN. Do not try to manage the stop manually.
 
 ### When in a LOSING position:
-1. **0 to -6 points**: Hold if thesis intact, EMAs still align, delta supports.
-2. **-6 to -10 points**: Reassess. If EMAs flipped or structure broke, FLATTEN immediately.
+1. **0 to -8 points**: Hold if thesis intact, EMAs still align. DO NOT FLATTEN — the 3-minute hold is enforced.
+2. **-8 to -12 points**: FLATTEN is allowed. Reassess — if EMAs flipped or structure broke, exit.
 3. **Approaching stop**: Let the stop do its job. NEVER widen a stop.
 4. **Time decay**: No progress in 10+ minutes? FLATTEN. The move isn't coming.
+5. **CRITICAL**: Do NOT panic-flatten at -5pts. That's normal MNQ noise. Trades need room to develop.
 
 ### Adding to winners (ADD):
 - ONLY add after price has moved 12+ points in your favor AND pulled back to a level
