@@ -82,6 +82,9 @@ class SessionController:
         self._is_stopped: bool = False
         self._stop_reason: str = ""
         self._circuit_breaker_max: Optional[int] = None
+        # Same-direction consecutive loss tracking (persisted for orchestrator)
+        self._last_loss_side: Optional[str] = None  # "long" or "short"
+        self._consecutive_same_dir_losses: int = 0
 
     # ── Session Lifecycle ────────────────────────────────────────────────────
 
@@ -110,6 +113,8 @@ class SessionController:
             self._max_drawdown = restored.get("max_drawdown", 0.0)
             self._is_stopped = restored.get("is_stopped", False)
             self._stop_reason = restored.get("stop_reason", "")
+            self._last_loss_side = restored.get("last_loss_side")
+            self._consecutive_same_dir_losses = restored.get("consecutive_same_dir_losses", 0)
             self._trades.clear()  # trades list not persisted (too large)
             logger.info(
                 "session_controller.restored_from_disk",
@@ -153,6 +158,8 @@ class SessionController:
             "max_drawdown": self._max_drawdown,
             "is_stopped": self._is_stopped,
             "stop_reason": self._stop_reason,
+            "last_loss_side": self._last_loss_side,
+            "consecutive_same_dir_losses": self._consecutive_same_dir_losses,
             "saved_at": datetime.now(tz=UTC).isoformat(),
         }
         try:

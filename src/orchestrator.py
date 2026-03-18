@@ -231,6 +231,24 @@ class TradingOrchestrator:
         # Start session
         self._session_ctrl.start_session()
 
+        # Restore same-direction loss block from persisted state.
+        # Without this, restarts clear the direction block and the system
+        # immediately re-enters the blocked direction and loses again.
+        if self._session_ctrl._last_loss_side is not None:
+            side_str = self._session_ctrl._last_loss_side
+            try:
+                self._last_loss_side = Side(side_str)
+            except ValueError:
+                self._last_loss_side = None
+            self._consecutive_same_dir_losses = self._session_ctrl._consecutive_same_dir_losses
+            if self._consecutive_same_dir_losses >= 2:
+                logger.info(
+                    "orchestrator.direction_block_restored",
+                    side=side_str,
+                    consecutive=self._consecutive_same_dir_losses,
+                    msg=f"Restored: {self._consecutive_same_dir_losses} consecutive {side_str} losses — direction blocked",
+                )
+
         # Check circuit breakers (multi-day/week/month loss limits)
         if self._circuit_breakers:
             cb_state = self._circuit_breakers.evaluate()
@@ -662,6 +680,12 @@ class TradingOrchestrator:
                 self._last_exit_was_loss = False
                 self._consecutive_same_dir_losses = 0
                 self._last_loss_side = None
+
+            # Persist direction-loss state to session controller (survives restarts)
+            self._session_ctrl._last_loss_side = (
+                self._last_loss_side.value if self._last_loss_side else None
+            )
+            self._session_ctrl._consecutive_same_dir_losses = self._consecutive_same_dir_losses
 
             # Deactivate monitors
             self._tick_stop_monitor.deactivate()
@@ -1510,6 +1534,12 @@ class TradingOrchestrator:
                         self._last_exit_was_loss = False
                         self._consecutive_same_dir_losses = 0
                         self._last_loss_side = None
+
+                    # Persist direction-loss state to session controller (survives restarts)
+                    self._session_ctrl._last_loss_side = (
+                        self._last_loss_side.value if self._last_loss_side else None
+                    )
+                    self._session_ctrl._consecutive_same_dir_losses = self._consecutive_same_dir_losses
 
             # 7d. Record level interaction for Reasoner memory
             self._record_level_interaction(action, state)
