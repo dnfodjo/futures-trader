@@ -373,12 +373,17 @@ class MarketState(BaseModel):
             else:
                 computed["vwap_zone"] = "very_extended"
 
-        # Nearest key level and distance
+        # Nearest key level and distance + resistance/support context
         if self.last_price > 0:
             nearest_level = None
             nearest_dist = float("inf")
             nearest_name = ""
             level_data = self.levels.model_dump()
+
+            # Classify each level as support or resistance relative to current price
+            resistance_levels: list[tuple[str, float, float]] = []  # (name, value, distance)
+            support_levels: list[tuple[str, float, float]] = []
+
             for name, val in level_data.items():
                 if val > 0:
                     dist = abs(self.last_price - val)
@@ -386,10 +391,84 @@ class MarketState(BaseModel):
                         nearest_dist = dist
                         nearest_level = val
                         nearest_name = name
+                    # Classify levels within 15 points
+                    if dist <= 15:
+                        if val > self.last_price:
+                            resistance_levels.append((name, val, val - self.last_price))
+                        else:
+                            support_levels.append((name, val, self.last_price - val))
+
             if nearest_level is not None and nearest_dist < 50:
                 computed["nearest_level"] = nearest_name
                 computed["nearest_level_distance"] = round(nearest_dist, 2)
                 computed["at_decision_point"] = nearest_dist <= 3.0
+
+            # CRITICAL: Resistance/support warnings for entry quality
+            # Sort by distance (closest first)
+            resistance_levels.sort(key=lambda x: x[2])
+            support_levels.sort(key=lambda x: x[2])
+
+            if resistance_levels:
+                closest_res = resistance_levels[0]
+                computed["nearest_resistance"] = closest_res[0]
+                computed["resistance_distance"] = round(closest_res[2], 2)
+                if closest_res[2] <= 5.0:
+                    computed["resistance_warning"] = (
+                        f"CAUTION: {closest_res[0]} resistance at {closest_res[1]:.1f} "
+                        f"is only {closest_res[2]:.1f}pts above. "
+                        f"DO NOT enter new longs within 5pts of resistance — "
+                        f"wait for breakout confirmation or pullback to support."
+                    )
+
+            if support_levels:
+                closest_sup = support_levels[0]
+                computed["nearest_support"] = closest_sup[0]
+                computed["support_distance"] = round(closest_sup[2], 2)
+                if closest_sup[2] <= 5.0:
+                    computed["support_warning"] = (
+                        f"CAUTION: {closest_sup[0]} support at {closest_sup[1]:.1f} "
+                        f"is only {closest_sup[2]:.1f}pts below. "
+                        f"DO NOT enter new shorts within 5pts of support — "
+                        f"wait for breakdown confirmation or rally to resistance."
+                    )
+
+            # Extension from VWAP warning
+            if vwap > 0 and self.last_price > 0:
+                vwap_dist_abs = abs(self.last_price - vwap)
+                if vwap_dist_abs > 10 and self.last_price > vwap:
+                    computed["extension_warning"] = (
+                        f"EXTENDED: Price is {vwap_dist_abs:.1f}pts ABOVE VWAP. "
+                        f"Do NOT chase longs when extended. Wait for a pullback "
+                        f"toward VWAP ({vwap:.1f}) or EMA21 before entering long."
+                    )
+                elif vwap_dist_abs > 10 and self.last_price < vwap:
+                    computed["extension_warning"] = (
+                        f"EXTENDED: Price is {vwap_dist_abs:.1f}pts BELOW VWAP. "
+                        f"Do NOT chase shorts when extended. Wait for a rally "
+                        f"toward VWAP ({vwap:.1f}) or EMA21 before entering short."
+                    )
+
+            # Session high/low proximity — explicit "don't chase" signal
+            sh = self.levels.session_high
+            sl = self.levels.session_low
+            if sh > 0 and sl > 0:
+                session_range = sh - sl
+                if session_range > 5:
+                    pct_of_range = (self.last_price - sl) / session_range
+                    if pct_of_range > 0.90:
+                        computed["session_position"] = "near_session_high"
+                        computed["chase_warning"] = (
+                            f"Price at {pct_of_range:.0%} of session range "
+                            f"({sl:.1f}-{sh:.1f}). TOO LATE for new longs — "
+                            f"wait for pullback or breakout with confirmation."
+                        )
+                    elif pct_of_range < 0.10:
+                        computed["session_position"] = "near_session_low"
+                        computed["chase_warning"] = (
+                            f"Price at {pct_of_range:.0%} of session range "
+                            f"({sl:.1f}-{sh:.1f}). TOO LATE for new shorts — "
+                            f"wait for bounce or breakdown with confirmation."
+                        )
 
         # Delta interpretation
         delta = self.flow.cumulative_delta

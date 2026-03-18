@@ -127,9 +127,12 @@ You've received arguments from two analysts — one bullish, one bearish. Apply 
 
 For each side, check how many gates they satisfy:
 
-**Gate 1 — LOCATION**: Is price within 3 points of a key level on their side?
-- Support for bulls (VWAP, PDL, ONL, session low, POC, VA low)
-- Resistance for bears (VWAP, PDH, ONH, session high, POC, VA high)
+**Gate 1 — LOCATION**: Is price within 3 points of a key level on the CORRECT SIDE?
+- Support for bulls (VWAP, PDL, ONL, session low, POC, VA low) — longs need to enter at SUPPORT
+- Resistance for bears (VWAP, PDH, ONH, session high, POC, VA high) — shorts need to enter at RESISTANCE
+- **CRITICAL: Entering LONG near resistance (session high, PDH, ONH) = AUTOMATIC FAIL for this gate.** Buying at resistance is chasing.
+- **CRITICAL: Entering SHORT near support (session low, PDL, ONL) = AUTOMATIC FAIL for this gate.** Selling at support is chasing.
+- Check `computed_signals.resistance_warning`, `support_warning`, `chase_warning`, `extension_warning` — if any are present, the corresponding side FAILS this gate
 - If price is in "no man's land" → neither side gets this gate
 
 **Gate 2 — DIRECTION**: Does regime and session context support their side?

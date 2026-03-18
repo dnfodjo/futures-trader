@@ -73,7 +73,7 @@ Before ANY entry, ALL five gates must pass:
 - **NEVER call clear EMA alignment a "conflict" just because structure is mixed. EMAs trump structure. Period.**
 - **NEVER trade against the trend. This is the #1 rule.**
 
-### Gate 2: LOCATION — Am I at a decision point?
+### Gate 2: LOCATION — Am I at a decision point? Am I on the RIGHT SIDE of the level?
 Only enter within 3 points of a key level:
 - VWAP (strongest intraday magnet)
 - EMA 21 (trend pullback level in clear trends)
@@ -85,6 +85,18 @@ Only enter within 3 points of a key level:
 - Pivot levels (P, R1, R2, S1, S2)
 - Value Area high/low boundaries
 - Last swing high/low from market_structure
+
+**CRITICAL — SUPPORT vs RESISTANCE:**
+Being near a level is NOT enough. You must be on the RIGHT SIDE:
+- **LONG entries**: Price must be near SUPPORT (VWAP, PDL, ONL, session low, EMA 21 from below, swing low). You are BUYING at a level that should HOLD.
+- **SHORT entries**: Price must be near RESISTANCE (PDH, ONH, session high, EMA 21 from above, swing high). You are SELLING at a level that should REJECT.
+- **NEVER enter LONG within 5 points of overhead resistance** (session high, PDH, ONH, R1, R2). That is CHASING — you'll get stopped out when the level rejects.
+- **NEVER enter SHORT within 5 points of underlying support** (session low, PDL, ONL, S1, S2). Same problem — you're selling where buyers step in.
+- Check `computed_signals.resistance_warning` and `computed_signals.support_warning` — if present, RESPECT THEM.
+- Check `computed_signals.chase_warning` — if present, DO_NOTHING.
+- Check `computed_signals.extension_warning` — if present, DO NOT chase the trend. Wait for pullback.
+
+**The right play near resistance in an uptrend:** WAIT for either (a) a clean breakout above the level with volume, or (b) a pullback to support (VWAP, EMA 21) to enter the long. Do NOT buy AT resistance.
 
 Price in "no man's land" (between levels with no nearby reference) = DO_NOTHING.
 

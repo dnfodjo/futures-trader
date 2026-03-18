@@ -866,9 +866,68 @@ class TradingOrchestrator:
                         )
                     )
 
+                    # Check if price is near resistance (longs) or support (shorts)
+                    # If so, the debate is probably RIGHT to block — don't override
+                    near_adverse_level = False
+                    if reasoner_action.side == Side.LONG:
+                        # Check overhead resistance: session high, PDH, ONH
+                        for level_val in [
+                            state.levels.session_high,
+                            state.levels.prior_day_high,
+                            state.levels.overnight_high,
+                        ]:
+                            if level_val > 0 and 0 < (level_val - state.last_price) <= 5.0:
+                                near_adverse_level = True
+                                logger.info(
+                                    "orchestrator.debate_override_blocked_resistance",
+                                    level=level_val,
+                                    price=state.last_price,
+                                    distance=round(level_val - state.last_price, 2),
+                                    msg="Not overriding debate — price near overhead resistance",
+                                )
+                                break
+                        # Also block if price is extended >10pts above VWAP
+                        if not near_adverse_level and state.levels.vwap > 0:
+                            vwap_ext = state.last_price - state.levels.vwap
+                            if vwap_ext > 10:
+                                near_adverse_level = True
+                                logger.info(
+                                    "orchestrator.debate_override_blocked_extended",
+                                    vwap_extension=round(vwap_ext, 2),
+                                    msg="Not overriding debate — price extended above VWAP",
+                                )
+                    elif reasoner_action.side == Side.SHORT:
+                        # Check underlying support: session low, PDL, ONL
+                        for level_val in [
+                            state.levels.session_low,
+                            state.levels.prior_day_low,
+                            state.levels.overnight_low,
+                        ]:
+                            if level_val > 0 and 0 < (state.last_price - level_val) <= 5.0:
+                                near_adverse_level = True
+                                logger.info(
+                                    "orchestrator.debate_override_blocked_support",
+                                    level=level_val,
+                                    price=state.last_price,
+                                    distance=round(state.last_price - level_val, 2),
+                                    msg="Not overriding debate — price near underlying support",
+                                )
+                                break
+                        # Also block if price is extended >10pts below VWAP
+                        if not near_adverse_level and state.levels.vwap > 0:
+                            vwap_ext = state.levels.vwap - state.last_price
+                            if vwap_ext > 10:
+                                near_adverse_level = True
+                                logger.info(
+                                    "orchestrator.debate_override_blocked_extended",
+                                    vwap_extension=round(vwap_ext, 2),
+                                    msg="Not overriding debate — price extended below VWAP",
+                                )
+
                     if (
                         reasoner_action.confidence >= 0.60
                         and emas_aligned
+                        and not near_adverse_level
                     ):
                         logger.info(
                             "orchestrator.debate_overridden",
@@ -1023,6 +1082,77 @@ class TradingOrchestrator:
                         msg="BLOCKED: Cannot go long when EMAs are bearish",
                     )
                     return
+
+        # 4e. Anti-chase guardrail: Block entries near adverse levels
+        # This is a HARD check that the LLM cannot override
+        if action.action == ActionType.ENTER and action.side is not None:
+            price = state.last_price
+            if action.side == Side.LONG:
+                # Don't enter long within 5pts of overhead resistance
+                for level_name, level_val in [
+                    ("session_high", state.levels.session_high),
+                    ("prior_day_high", state.levels.prior_day_high),
+                    ("overnight_high", state.levels.overnight_high),
+                ]:
+                    if level_val > 0 and 0 < (level_val - price) <= 5.0:
+                        logger.warning(
+                            "orchestrator.anti_chase_blocked",
+                            side="long",
+                            price=price,
+                            level=level_name,
+                            level_val=level_val,
+                            distance=round(level_val - price, 2),
+                            msg=f"BLOCKED: Cannot enter long within 5pts of {level_name} resistance",
+                        )
+                        return
+                # Don't enter long when in top 10% of session range
+                sh = state.levels.session_high
+                sl = state.levels.session_low
+                if sh > 0 and sl > 0 and (sh - sl) > 5:
+                    pct = (price - sl) / (sh - sl)
+                    if pct > 0.90:
+                        logger.warning(
+                            "orchestrator.anti_chase_blocked",
+                            side="long",
+                            price=price,
+                            session_pct=round(pct, 2),
+                            session_range=f"{sl:.1f}-{sh:.1f}",
+                            msg="BLOCKED: Cannot enter long at top 10% of session range",
+                        )
+                        return
+            elif action.side == Side.SHORT:
+                # Don't enter short within 5pts of underlying support
+                for level_name, level_val in [
+                    ("session_low", state.levels.session_low),
+                    ("prior_day_low", state.levels.prior_day_low),
+                    ("overnight_low", state.levels.overnight_low),
+                ]:
+                    if level_val > 0 and 0 < (price - level_val) <= 5.0:
+                        logger.warning(
+                            "orchestrator.anti_chase_blocked",
+                            side="short",
+                            price=price,
+                            level=level_name,
+                            level_val=level_val,
+                            distance=round(price - level_val, 2),
+                            msg=f"BLOCKED: Cannot enter short within 5pts of {level_name} support",
+                        )
+                        return
+                # Don't enter short when in bottom 10% of session range
+                sh = state.levels.session_high
+                sl = state.levels.session_low
+                if sh > 0 and sl > 0 and (sh - sl) > 5:
+                    pct = (price - sl) / (sh - sl)
+                    if pct < 0.10:
+                        logger.warning(
+                            "orchestrator.anti_chase_blocked",
+                            side="short",
+                            price=price,
+                            session_pct=round(pct, 2),
+                            session_range=f"{sl:.1f}-{sh:.1f}",
+                            msg="BLOCKED: Cannot enter short at bottom 10% of session range",
+                        )
+                        return
 
         # 5. Run through guardrails
         result = self._guardrails.check(
