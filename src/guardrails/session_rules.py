@@ -53,7 +53,7 @@ class SessionRuleGuardrail:
         daily_loss_limit: float = 400.0,
         blackout_minutes: int = 5,
         post_blackout_minutes: int = 10,
-        max_daily_trades: int = 6,
+        max_daily_trades: int = 10,
         max_contracts_eth: int = 2,
     ) -> None:
         self._max_consecutive_losers = max_consecutive_losers
@@ -136,19 +136,12 @@ class SessionRuleGuardrail:
                 ),
             )
 
-        # 5b. ETH hard stop: 2+ consecutive losers during ETH = no more entries until RTH
-        if (
-            consecutive_losers >= 2
-            and hasattr(state, "session_phase")
-            and state.session_phase in self._ETH_PHASES
-        ):
-            return GuardrailResult(
-                allowed=False,
-                reason=(
-                    f"session_rule: ETH trading halted — {consecutive_losers} consecutive "
-                    f"losers during {state.session_phase.value}. Wait for RTH."
-                ),
-            )
+        # 5b. ETH hard stop — REMOVED
+        # Was: 2+ consecutive losers during ETH = no entries until RTH
+        # Problem: 2 tiny losses ($4-8) locked out the system for 12+ hours,
+        # missing a 100+ point bull run. The post-loss cooling rule (5) already
+        # requires 0.70+ confidence after 2 losers, which is sufficient protection.
+        # Keeping it here as a comment so we remember why it was removed.
 
         # 6. ETH max contracts cap — hard limit during extended hours
         if (
