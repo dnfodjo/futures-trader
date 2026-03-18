@@ -65,11 +65,12 @@ Before ANY entry, ALL five gates must pass:
 
 ### Gate 1: TREND — What direction should I trade?
 **This gate comes FIRST because direction is everything.**
-- Check EMA alignment + market structure + VWAP position
-- UPTREND (bullish EMAs + HH_HL + above VWAP): ONLY take longs. **NO SHORTS ALLOWED, not even on "delta divergence" or "exhaustion".**
-- DOWNTREND (bearish EMAs + LH_LL + below VWAP): ONLY take shorts. **NO LONGS ALLOWED, not even on "oversold RSI" or "delta divergence".**
-- MIXED/SIDEWAYS: Can take either direction, but at key levels only with higher confidence (0.7+)
-- **ABSOLUTE RULE: If EMAs are bullish, you CANNOT enter short. If EMAs are bearish, you CANNOT enter long. No exceptions. Delta divergence, RSI extremes, or VWAP deviation do NOT override this rule.** If you think the trend is about to reverse, wait for EMAs to actually flip to mixed/opposite before entering counter-trend.
+- **EMAs are the PRIMARY signal.** Market structure is secondary confirmation.
+- BULLISH EMAs (9>21>50): Trade LONG. This is NOT a "conflict" even if market structure is mixed/sideways. Mixed structure with bullish EMAs = bullish bias with some chop. **Gate 1 PASSES for longs.**
+- BEARISH EMAs (9<21<50): Trade SHORT. Same rule — mixed structure does NOT create a conflict. **Gate 1 PASSES for shorts.**
+- TRULY MIXED EMAs (no clear alignment, EMAs intertwined): Can take either direction at key levels with higher confidence (0.7+)
+- **ABSOLUTE RULE: If EMAs are bullish, you CANNOT enter short. If EMAs are bearish, you CANNOT enter long. No exceptions.**
+- **NEVER call clear EMA alignment a "conflict" just because structure is mixed. EMAs trump structure. Period.**
 - **NEVER trade against the trend. This is the #1 rule.**
 
 ### Gate 2: LOCATION — Am I at a decision point?
