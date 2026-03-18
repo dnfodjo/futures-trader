@@ -1083,18 +1083,102 @@ class TradingOrchestrator:
                     )
                     return
 
+        # 4d2. RSI extreme guard — HARD block on overbought/oversold entries
+        # The prompt tells the LLM "don't enter longs if RSI > 70" but LLMs
+        # regularly ignore this. Enforce it deterministically.
+        if action.action == ActionType.ENTER and action.side is not None:
+            rsi = state.rsi
+            if rsi is not None and rsi > 0:
+                if action.side == Side.LONG and rsi > 70:
+                    logger.warning(
+                        "orchestrator.rsi_guard_blocked",
+                        side="long",
+                        rsi=round(rsi, 1),
+                        msg="BLOCKED: Cannot enter long when RSI > 70 (overbought)",
+                    )
+                    return
+                if action.side == Side.SHORT and rsi < 30:
+                    logger.warning(
+                        "orchestrator.rsi_guard_blocked",
+                        side="short",
+                        rsi=round(rsi, 1),
+                        msg="BLOCKED: Cannot enter short when RSI < 30 (oversold)",
+                    )
+                    return
+
+        # 4d3. VWAP extension guard — don't chase extended moves
+        # Buying 15pts above VWAP with no pullback is chasing momentum.
+        # Wait for a pullback toward VWAP or EMA21 instead.
+        if action.action == ActionType.ENTER and action.side is not None:
+            vwap = state.levels.vwap
+            if vwap > 0 and state.last_price > 0:
+                vwap_extension = state.last_price - vwap
+                if action.side == Side.LONG and vwap_extension > 12.0:
+                    logger.warning(
+                        "orchestrator.vwap_extension_blocked",
+                        side="long",
+                        price=state.last_price,
+                        vwap=vwap,
+                        extension=round(vwap_extension, 1),
+                        msg="BLOCKED: Cannot enter long when >12pts above VWAP — wait for pullback",
+                    )
+                    return
+                if action.side == Side.SHORT and vwap_extension < -12.0:
+                    logger.warning(
+                        "orchestrator.vwap_extension_blocked",
+                        side="short",
+                        price=state.last_price,
+                        vwap=vwap,
+                        extension=round(vwap_extension, 1),
+                        msg="BLOCKED: Cannot enter short when >12pts below VWAP — wait for pullback",
+                    )
+                    return
+
+        # 4d4. Momentum exhaustion guard — don't chase one-way moves
+        # If the last 4+ one-minute bars are ALL in the same direction with no
+        # pullback, we're chasing an exhausting move. Wait for a pullback bar.
+        if action.action == ActionType.ENTER and action.side is not None:
+            bars = state.recent_bars
+            if bars and len(bars) >= 4:
+                last_4 = bars[-4:]
+                if action.side == Side.LONG:
+                    all_green = all(
+                        b.get("close", 0) > b.get("open", 0) for b in last_4
+                    )
+                    if all_green:
+                        logger.warning(
+                            "orchestrator.momentum_exhaustion_blocked",
+                            side="long",
+                            bars_checked=4,
+                            msg="BLOCKED: 4+ consecutive green bars — chasing. Wait for pullback.",
+                        )
+                        return
+                elif action.side == Side.SHORT:
+                    all_red = all(
+                        b.get("close", 0) < b.get("open", 0) for b in last_4
+                    )
+                    if all_red:
+                        logger.warning(
+                            "orchestrator.momentum_exhaustion_blocked",
+                            side="short",
+                            bars_checked=4,
+                            msg="BLOCKED: 4+ consecutive red bars — chasing. Wait for pullback.",
+                        )
+                        return
+
         # 4e. Anti-chase guardrail: Block entries near adverse levels
         # This is a HARD check that the LLM cannot override
         if action.action == ActionType.ENTER and action.side is not None:
             price = state.last_price
             if action.side == Side.LONG:
-                # Don't enter long within 5pts of overhead resistance
+                # Don't enter long within 5pts of overhead resistance OR at/above it
+                # (buying AT the session high is just as bad as buying 3pts below it)
                 for level_name, level_val in [
                     ("session_high", state.levels.session_high),
                     ("prior_day_high", state.levels.prior_day_high),
                     ("overnight_high", state.levels.overnight_high),
                 ]:
-                    if level_val > 0 and 0 < (level_val - price) <= 5.0:
+                    if level_val > 0 and abs(level_val - price) <= 5.0:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="long",
@@ -1105,12 +1189,14 @@ class TradingOrchestrator:
                             msg=f"BLOCKED: Cannot enter long within 5pts of {level_name} resistance",
                         )
                         return
-                # Don't enter long when in top 10% of session range
+                # Don't enter long when in top 15% of session range
+                # (top 10% was too permissive — 90% of a 100pt range is still
+                # only 10pts from the high, easy to chase)
                 sh = state.levels.session_high
                 sl = state.levels.session_low
                 if sh > 0 and sl > 0 and (sh - sl) > 5:
                     pct = (price - sl) / (sh - sl)
-                    if pct > 0.90:
+                    if pct > 0.85:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="long",
@@ -1121,13 +1207,13 @@ class TradingOrchestrator:
                         )
                         return
             elif action.side == Side.SHORT:
-                # Don't enter short within 5pts of underlying support
+                # Don't enter short within 5pts of underlying support OR at/below it
                 for level_name, level_val in [
                     ("session_low", state.levels.session_low),
                     ("prior_day_low", state.levels.prior_day_low),
                     ("overnight_low", state.levels.overnight_low),
                 ]:
-                    if level_val > 0 and 0 < (price - level_val) <= 5.0:
+                    if level_val > 0 and abs(price - level_val) <= 5.0:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="short",
@@ -1138,12 +1224,12 @@ class TradingOrchestrator:
                             msg=f"BLOCKED: Cannot enter short within 5pts of {level_name} support",
                         )
                         return
-                # Don't enter short when in bottom 10% of session range
+                # Don't enter short when in bottom 15% of session range
                 sh = state.levels.session_high
                 sl = state.levels.session_low
                 if sh > 0 and sl > 0 and (sh - sl) > 5:
                     pct = (price - sl) / (sh - sl)
-                    if pct < 0.10:
+                    if pct < 0.15:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="short",

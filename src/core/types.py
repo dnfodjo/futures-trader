@@ -392,8 +392,17 @@ class MarketState(BaseModel):
                         nearest_level = val
                         nearest_name = name
                     # Classify levels within 15 points
+                    # Session high/PDH/ONH are ALWAYS resistance for longs
+                    # Session low/PDL/ONL are ALWAYS support for shorts
+                    # This ensures warnings fire even when price IS at the level
                     if dist <= 15:
-                        if val > self.last_price:
+                        always_resistance = {"session_high", "prior_day_high", "overnight_high"}
+                        always_support = {"session_low", "prior_day_low", "overnight_low"}
+                        if name in always_resistance:
+                            resistance_levels.append((name, val, dist))
+                        elif name in always_support:
+                            support_levels.append((name, val, dist))
+                        elif val > self.last_price:
                             resistance_levels.append((name, val, val - self.last_price))
                         else:
                             support_levels.append((name, val, self.last_price - val))
