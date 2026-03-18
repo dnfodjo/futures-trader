@@ -950,6 +950,46 @@ class TradingOrchestrator:
                 )
                 return
 
+        # 4d. Trend alignment guard — HARD block on counter-trend entries
+        # The LLM repeatedly enters SHORT during bullish EMAs by labeling
+        # structure as "mixed" to find a loophole. This is a deterministic
+        # check that cannot be overridden by LLM reasoning.
+        if action.action == ActionType.ENTER and action.side is not None:
+            emas = state.emas
+            ema9 = emas.get("ema_9", 0.0)
+            ema21 = emas.get("ema_21", 0.0)
+            ema50 = emas.get("ema_50", 0.0)
+
+            if ema9 > 0 and ema21 > 0 and ema50 > 0:
+                # Clear bullish: EMA9 > EMA21 > EMA50 (with 0.5pt tolerance)
+                bullish = ema9 > ema21 - 0.5 and ema21 > ema50 - 0.5
+                # Clear bearish: EMA9 < EMA21 < EMA50 (with 0.5pt tolerance)
+                bearish = ema9 < ema21 + 0.5 and ema21 < ema50 + 0.5
+
+                if bullish and action.side == Side.SHORT:
+                    logger.warning(
+                        "orchestrator.trend_guard_blocked",
+                        side="short",
+                        ema9=round(ema9, 2),
+                        ema21=round(ema21, 2),
+                        ema50=round(ema50, 2),
+                        reasoning=action.reasoning[:80] if action.reasoning else "",
+                        msg="BLOCKED: Cannot short when EMAs are bullish",
+                    )
+                    return
+
+                if bearish and action.side == Side.LONG:
+                    logger.warning(
+                        "orchestrator.trend_guard_blocked",
+                        side="long",
+                        ema9=round(ema9, 2),
+                        ema21=round(ema21, 2),
+                        ema50=round(ema50, 2),
+                        reasoning=action.reasoning[:80] if action.reasoning else "",
+                        msg="BLOCKED: Cannot go long when EMAs are bearish",
+                    )
+                    return
+
         # 5. Run through guardrails
         result = self._guardrails.check(
             action=action,
