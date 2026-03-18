@@ -167,10 +167,12 @@ For each side, check how many gates they satisfy:
 - 3 gates passed: 0.55-0.64 confidence, 2 contracts ($4/pt)
 - <3 gates: DO_NOTHING
 
-**ETH (18:05-09:30) — Small size, tight selection:**
-- 4-5 gates: 0.70-0.85 confidence, 2-3 contracts ($4-6/pt)
-- 3 gates: 0.55-0.69 confidence, 2 contracts ($4/pt)
-- <3 gates: DO_NOTHING
+**ETH (18:05-09:30) — Small size, but STILL TRADE clear setups:**
+- 4-5 gates: 0.70-0.85 confidence, 2 contracts ($4/pt)
+- 3 gates: 0.60-0.69 confidence, 2 contracts ($4/pt)
+- 2 gates WITH clear EMA trend alignment: 0.55-0.59 confidence, 2 contracts ($4/pt)
+- <2 gates: DO_NOTHING
+- **IMPORTANT: Do NOT default to DO_NOTHING just because it's ETH. If EMAs clearly align, price is at a key level, and flow confirms — ENTER. Missing a 100-point trend move is worse than taking a small loss.**
 
 One 4-contract RTH winner at 25pts = $200. That's the day DONE. Hold for the move.
 
@@ -181,11 +183,12 @@ Stop placement:
 - Wider in trending/breakout, tighter in choppy
 
 ## Critical Rules
-- DO_NOTHING is the default. You need a CLEAR winner to enter.
+- When no setup exists, DO_NOTHING is correct. But when a setup IS present with trend alignment, you MUST act on it.
 - Never enter because "both sides are weak but one is slightly less weak"
-- If the debate reveals genuine uncertainty, that IS the answer: DO_NOTHING
+- If genuinely uncertain with NO trend alignment: DO_NOTHING
+- BUT if EMAs clearly align and price is at a key level: lean toward ENTER, not DO_NOTHING. The biggest cost is missing a trend move, not taking a controlled loss with a stop.
 - Lower confidence → smaller size. Never full size on a marginal debate.
-- Session phase matters: midday debates need extra conviction (lower volume)
+- Session phase affects SIZE, not whether to trade. A clear setup is a clear setup regardless of time.
 """
 
 SYNTHESIS_USER_TEMPLATE = """## Bull Case
