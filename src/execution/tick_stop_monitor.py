@@ -54,13 +54,13 @@ class TickStopMonitor:
         self,
         flatten_fn: FlattenFn,
         target_symbol: str = "",
-        trail_distance: float = 10.0,
-        trail_activation_points: float = 8.0,
-        min_stop_distance: float = 4.0,
-        tighten_at_profit: float = 20.0,
-        tightened_distance: float = 5.0,
-        mid_tighten_at_profit: float = 12.0,
-        mid_tightened_distance: float = 7.0,
+        trail_distance: float = 12.0,       # was 10 — wider trail gives trades room
+        trail_activation_points: float = 10.0,  # was 8 — don't trail until solid profit
+        min_stop_distance: float = 5.0,      # was 4 — never trail closer than 5pts
+        tighten_at_profit: float = 25.0,     # was 20 — only tighten at big profit
+        tightened_distance: float = 6.0,     # was 5 — still give room at high profit
+        mid_tighten_at_profit: float = 15.0, # was 12 — intermediate tightening later
+        mid_tightened_distance: float = 8.0, # was 7 — wider mid-tier trail
     ) -> None:
         """Initialize the tick stop monitor.
 
@@ -171,10 +171,10 @@ class TickStopMonitor:
             if trail_distance > 0:
                 self._trail_distance = trail_distance
             elif atr > 0:
-                # ETH ATR-based: tighter clamps (3-6 instead of 5-8)
-                self._trail_distance = round(max(3.0, min(6.0, atr * 2.0)), 1)
-                self._mid_tightened_distance = round(max(2.5, min(4.0, atr * 1.5)), 1)
-                self._tightened_distance = round(max(2.0, min(3.5, atr * 1.2)), 1)
+                # ETH ATR-based: wider clamps to survive normal pullbacks
+                self._trail_distance = round(max(6.0, min(10.0, atr * 2.5)), 1)
+                self._mid_tightened_distance = round(max(4.0, min(7.0, atr * 1.8)), 1)
+                self._tightened_distance = round(max(3.0, min(5.0, atr * 1.3)), 1)
             else:
                 self._trail_distance = eth_trail_distance
         else:
@@ -184,11 +184,11 @@ class TickStopMonitor:
             if trail_distance > 0:
                 self._trail_distance = trail_distance
             elif atr > 0:
-                # ATR-based trail: 2.5x ATR, clamped between 8 and 12 points
-                # Wider trail = more room for trades to develop, fewer premature stops
-                self._trail_distance = round(max(8.0, min(12.0, atr * 2.5)), 1)
-                self._mid_tightened_distance = round(max(5.0, min(8.0, atr * 1.8)), 1)
-                self._tightened_distance = round(max(4.0, min(6.0, atr * 1.3)), 1)
+                # ATR-based trail: 3x ATR, clamped between 10 and 15 points
+                # Wide trail = more room for trades to develop into big winners
+                self._trail_distance = round(max(10.0, min(15.0, atr * 3.0)), 1)
+                self._mid_tightened_distance = round(max(7.0, min(10.0, atr * 2.0)), 1)
+                self._tightened_distance = round(max(5.0, min(7.0, atr * 1.5)), 1)
             else:
                 self._trail_distance = self._default_trail_distance
 

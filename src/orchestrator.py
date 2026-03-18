@@ -720,6 +720,17 @@ class TradingOrchestrator:
                     self._trail_manager.confirm_modify(success=False)
                     logger.warning("orchestrator.trail_modify_failed", exc_info=True)
 
+        # 2b-pre. Asian session block — no new entries during 6PM-2AM ET
+        # Asian session has thin liquidity, narrow ranges, and no edge.
+        # The system consistently loses money during Asian hours.
+        # We still monitor positions and handle stops, just don't take new trades.
+        # Only block if NOT currently in a position (still need to manage open trades).
+        if position is None:
+            current_phase = clock.get_session_phase()
+            if current_phase == SessionPhase.ASIAN:
+                # Skip the LLM call entirely — save cost and avoid bad entries
+                return
+
         # 2b. Run setup detector and price action analyzer (pre-processing)
         detected_setups_text = ""
         price_narrative = ""
@@ -825,180 +836,16 @@ class TradingOrchestrator:
             )
             return
 
-        # 4a. Bull/bear debate for ENTER decisions (higher quality entries)
-        if action.action == ActionType.ENTER and self._debate:
-            reasoner_action = action  # preserve original reasoner decision
-            try:
-                debate_result = await self._debate.quick_decide(
-                    state,
-                    detected_setups=detected_setups_text,
-                    price_action_narrative=price_narrative,
-                )
-                self._debate_count += 1
+        # 4a. Debate SKIPPED — single LLM call for speed.
+        # The debate added 6-12s latency and blocked ~80% of entries.
+        # Reasoner decision goes straight to guardrails.
+        # (debate code removed — guardrails provide sufficient filtering)
 
-                # Debate may override the original action
-                action = debate_result.action
-
-                logger.info(
-                    "orchestrator.debate_complete",
-                    action=action.action.value,
-                    confidence=action.confidence,
-                    latency_ms=debate_result.total_latency_ms,
-                )
-
-                # If debate says DO_NOTHING, check if reasoner had a strong
-                # trend-aligned entry. If so, override the debate and go with
-                # the reasoner. The debate LLM is too conservative during ETH
-                # and blocks every single entry.
-                if action.action == ActionType.DO_NOTHING:
-                    emas = state.emas
-                    ema9 = emas.get("ema_9", 0.0)
-                    ema21 = emas.get("ema_21", 0.0)
-                    ema50 = emas.get("ema_50", 0.0)
-                    emas_aligned = (
-                        ema9 > 0 and ema21 > 0 and ema50 > 0
-                        and (
-                            (ema9 > ema21 - 0.5 and ema21 > ema50 - 0.5  # bullish
-                             and reasoner_action.side == Side.LONG)
-                            or
-                            (ema9 < ema21 + 0.5 and ema21 < ema50 + 0.5  # bearish
-                             and reasoner_action.side == Side.SHORT)
-                        )
-                    )
-
-                    # Check if price is near resistance (longs) or support (shorts)
-                    # If so, the debate is probably RIGHT to block — don't override
-                    near_adverse_level = False
-                    if reasoner_action.side == Side.LONG:
-                        # Check overhead resistance: session high, PDH, ONH
-                        for level_val in [
-                            state.levels.session_high,
-                            state.levels.prior_day_high,
-                            state.levels.overnight_high,
-                        ]:
-                            if level_val > 0 and 0 < (level_val - state.last_price) <= 5.0:
-                                near_adverse_level = True
-                                logger.info(
-                                    "orchestrator.debate_override_blocked_resistance",
-                                    level=level_val,
-                                    price=state.last_price,
-                                    distance=round(level_val - state.last_price, 2),
-                                    msg="Not overriding debate — price near overhead resistance",
-                                )
-                                break
-                        # Also block if price is extended >10pts above VWAP
-                        if not near_adverse_level and state.levels.vwap > 0:
-                            vwap_ext = state.last_price - state.levels.vwap
-                            if vwap_ext > 10:
-                                near_adverse_level = True
-                                logger.info(
-                                    "orchestrator.debate_override_blocked_extended",
-                                    vwap_extension=round(vwap_ext, 2),
-                                    msg="Not overriding debate — price extended above VWAP",
-                                )
-                    elif reasoner_action.side == Side.SHORT:
-                        # Check underlying support: session low, PDL, ONL
-                        for level_val in [
-                            state.levels.session_low,
-                            state.levels.prior_day_low,
-                            state.levels.overnight_low,
-                        ]:
-                            if level_val > 0 and 0 < (state.last_price - level_val) <= 5.0:
-                                near_adverse_level = True
-                                logger.info(
-                                    "orchestrator.debate_override_blocked_support",
-                                    level=level_val,
-                                    price=state.last_price,
-                                    distance=round(state.last_price - level_val, 2),
-                                    msg="Not overriding debate — price near underlying support",
-                                )
-                                break
-                        # Also block if price is extended >10pts below VWAP
-                        if not near_adverse_level and state.levels.vwap > 0:
-                            vwap_ext = state.levels.vwap - state.last_price
-                            if vwap_ext > 10:
-                                near_adverse_level = True
-                                logger.info(
-                                    "orchestrator.debate_override_blocked_extended",
-                                    vwap_extension=round(vwap_ext, 2),
-                                    msg="Not overriding debate — price extended below VWAP",
-                                )
-
-                    if (
-                        reasoner_action.confidence >= 0.60
-                        and emas_aligned
-                        and not near_adverse_level
-                    ):
-                        logger.info(
-                            "orchestrator.debate_overridden",
-                            reasoner_action=reasoner_action.action.value,
-                            reasoner_confidence=reasoner_action.confidence,
-                            reasoner_side=reasoner_action.side.value if reasoner_action.side else None,
-                            debate_action="DO_NOTHING",
-                            debate_confidence=action.confidence,
-                            msg="Reasoner trend-aligned entry overrides cautious debate",
-                        )
-                        action = reasoner_action
-                    else:
-                        return
-
-                # 4b. Stop-breach check: After debate (which takes 9-12s),
-                # check if the live price has moved significantly against our
-                # intended direction. If price moved more than 60% of the stop
-                # distance, abort — we'd enter with too little cushion.
-                if (
-                    action.action == ActionType.ENTER
-                    and action.side is not None
-                    and action.stop_distance is not None
-                    and state.last_price > 0
-                ):
-                    decision_price = state.last_price  # price at cycle start
-                    stop_dist = action.stop_distance
-
-                    # Get fresh price from tick_stop_monitor (updated every tick)
-                    fresh_price = (
-                        self._tick_stop_monitor._last_price
-                        if self._tick_stop_monitor and self._tick_stop_monitor._last_price > 0
-                        else decision_price
-                    )
-
-                    if action.side == Side.LONG:
-                        price_moved_against = decision_price - fresh_price
-                        if price_moved_against > stop_dist * 0.6:
-                            logger.warning(
-                                "orchestrator.stale_entry_aborted",
-                                side="long",
-                                decision_price=decision_price,
-                                fresh_price=fresh_price,
-                                moved_against=round(price_moved_against, 2),
-                                stop_dist=stop_dist,
-                                reason="Price fell too far during debate — would enter near stop",
-                            )
-                            return
-                    elif action.side == Side.SHORT:
-                        price_moved_against = fresh_price - decision_price
-                        if price_moved_against > stop_dist * 0.6:
-                            logger.warning(
-                                "orchestrator.stale_entry_aborted",
-                                side="short",
-                                decision_price=decision_price,
-                                fresh_price=fresh_price,
-                                moved_against=round(price_moved_against, 2),
-                                stop_dist=stop_dist,
-                                reason="Price rose too far during debate — would enter near stop",
-                            )
-                            return
-
-            except Exception:
-                logger.warning("orchestrator.debate_failed", exc_info=True)
-                # Fall through with original reasoner decision
-
-        # 4c. Trail protection — don't let LLM flatten winners prematurely
-        # Two layers of protection:
-        # 1. Time-based: Block flattens in first 60s unless trade is losing
-        # 2. Profit-based: If ANY profit exists, let trail manage the exit
-        # The LLM consistently cuts winners at +1-3pts after 14-17 seconds
-        # when the trail could ride them to +10-20pts.
+        # 4c. Position protection — don't let LLM cut winners short
+        # Three layers:
+        # 1. Time-based: Block flattens in first 180s unless trade is losing badly
+        # 2. Profit-based: If profitable, let trail manage the exit
+        # 3. Scale-out minimum: No scale-out before +10pts profit
         if (
             action.action == ActionType.FLATTEN
             and position is not None
@@ -1009,12 +856,14 @@ class TradingOrchestrator:
             else:
                 unrealized_pts = position.avg_entry - state.last_price
 
-            # Layer 1: Time-based minimum hold
-            # Don't flatten in first 60 seconds unless trade is losing (< -2pts)
-            min_hold_sec = 60
+            # Layer 1: Time-based minimum hold — 3 MINUTES
+            # Don't flatten in first 180s unless trade is losing badly (< -5pts)
+            # The LLM cuts winners at +2-4pts after 15-30 seconds.
+            # 3 minutes gives the trade time to develop.
+            min_hold_sec = 180
             if (
                 position.time_in_trade_sec < min_hold_sec
-                and unrealized_pts > -2.0
+                and unrealized_pts > -5.0
             ):
                 logger.info(
                     "orchestrator.min_hold_suppressed_flatten",
@@ -1022,12 +871,12 @@ class TradingOrchestrator:
                     min_hold=min_hold_sec,
                     unrealized_pts=round(unrealized_pts, 2),
                     reasoning=action.reasoning[:80] if action.reasoning else "",
-                    msg="Too early to flatten — minimum hold period not met",
+                    msg="Too early to flatten — 3min minimum hold not met",
                 )
                 return
 
             # Layer 2: Trail-based profit protection
-            # If trail is active and position is profitable at all, let trail manage exit
+            # If trail is active and position is profitable, let trail manage exit
             if (
                 self._tick_stop_monitor is not None
                 and self._tick_stop_monitor.is_active
@@ -1043,10 +892,33 @@ class TradingOrchestrator:
                 )
                 return
 
-        # 4d. Trend alignment guard — HARD block on counter-trend entries
-        # The LLM repeatedly enters SHORT during bullish EMAs by labeling
-        # structure as "mixed" to find a loophole. This is a deterministic
-        # check that cannot be overridden by LLM reasoning.
+        # 4c2. Scale-out minimum profit — HARD BLOCK before +10pts
+        # The LLM scales out at +4-6pts, turning potential 20pt winners into $17.
+        # Professional traders hold for the full move. Scale-out only at milestones.
+        if (
+            action.action == ActionType.SCALE_OUT
+            and position is not None
+        ):
+            if position.side == Side.LONG:
+                unrealized_pts = state.last_price - position.avg_entry
+            else:
+                unrealized_pts = position.avg_entry - state.last_price
+
+            if unrealized_pts < 10.0:
+                logger.info(
+                    "orchestrator.scale_out_too_early",
+                    unrealized_pts=round(unrealized_pts, 2),
+                    min_required=10.0,
+                    side=position.side.value,
+                    msg="BLOCKED: Cannot scale out before +10pts — let winners run",
+                )
+                return
+
+        # 4d. Regime-aware trend guard — blocks counter-trend UNLESS conditions
+        # justify it (extended from VWAP, EMAs flat/crossing, or high confidence).
+        # The old rigid guard blocked ALL counter-trend entries, which meant:
+        # - Couldn't short during selloffs until EMAs caught up (60-80% of move missed)
+        # - Couldn't long bounces until EMAs flipped (bounce over by then)
         if action.action == ActionType.ENTER and action.side is not None:
             emas = state.emas
             ema9 = emas.get("ema_9", 0.0)
@@ -1054,32 +926,52 @@ class TradingOrchestrator:
             ema50 = emas.get("ema_50", 0.0)
 
             if ema9 > 0 and ema21 > 0 and ema50 > 0:
-                # Clear bullish: EMA9 > EMA21 > EMA50 (with 0.5pt tolerance)
-                bullish = ema9 > ema21 - 0.5 and ema21 > ema50 - 0.5
-                # Clear bearish: EMA9 < EMA21 < EMA50 (with 0.5pt tolerance)
-                bearish = ema9 < ema21 + 0.5 and ema21 < ema50 + 0.5
+                # Measure EMA spread — how "strong" is the trend signal
+                ema_spread = abs(ema9 - ema50)  # total spread across EMAs
+                strong_trend = ema_spread > 5.0  # >5pts spread = genuine trend
 
-                if bullish and action.side == Side.SHORT:
+                # Clear bullish: EMA9 > EMA21 > EMA50 with meaningful spread
+                bullish = ema9 > ema21 and ema21 > ema50 and strong_trend
+                # Clear bearish: EMA9 < EMA21 < EMA50 with meaningful spread
+                bearish = ema9 < ema21 and ema21 < ema50 and strong_trend
+
+                # Check if price is extended from VWAP (mean reversion candidate)
+                vwap = state.levels.vwap
+                vwap_extension = abs(state.last_price - vwap) if vwap > 0 else 0.0
+
+                # Allow counter-trend when:
+                # 1. EMAs are flat/crossing (spread < 5pts) — no clear trend
+                # 2. Price >20pts from VWAP — mean reversion opportunity
+                # 3. High confidence (0.70+) — LLM sees something strong
+                allow_counter = (
+                    not strong_trend  # EMAs are flat/crossing
+                    or vwap_extension > 20.0  # extended — mean reversion OK
+                    or action.confidence >= 0.70  # high conviction override
+                )
+
+                if bullish and action.side == Side.SHORT and not allow_counter:
                     logger.warning(
                         "orchestrator.trend_guard_blocked",
                         side="short",
                         ema9=round(ema9, 2),
                         ema21=round(ema21, 2),
                         ema50=round(ema50, 2),
-                        reasoning=action.reasoning[:80] if action.reasoning else "",
-                        msg="BLOCKED: Cannot short when EMAs are bullish",
+                        ema_spread=round(ema_spread, 1),
+                        vwap_ext=round(vwap_extension, 1),
+                        msg="BLOCKED: Cannot short in strong uptrend (EMAs spread >5pts)",
                     )
                     return
 
-                if bearish and action.side == Side.LONG:
+                if bearish and action.side == Side.LONG and not allow_counter:
                     logger.warning(
                         "orchestrator.trend_guard_blocked",
                         side="long",
                         ema9=round(ema9, 2),
                         ema21=round(ema21, 2),
                         ema50=round(ema50, 2),
-                        reasoning=action.reasoning[:80] if action.reasoning else "",
-                        msg="BLOCKED: Cannot go long when EMAs are bearish",
+                        ema_spread=round(ema_spread, 1),
+                        vwap_ext=round(vwap_extension, 1),
+                        msg="BLOCKED: Cannot go long in strong downtrend (EMAs spread >5pts)",
                     )
                     return
 
@@ -1106,79 +998,26 @@ class TradingOrchestrator:
                     )
                     return
 
-        # 4d3. VWAP extension guard — don't chase extended moves
-        # Buying 15pts above VWAP with no pullback is chasing momentum.
-        # Wait for a pullback toward VWAP or EMA21 instead.
-        if action.action == ActionType.ENTER and action.side is not None:
-            vwap = state.levels.vwap
-            if vwap > 0 and state.last_price > 0:
-                vwap_extension = state.last_price - vwap
-                if action.side == Side.LONG and vwap_extension > 12.0:
-                    logger.warning(
-                        "orchestrator.vwap_extension_blocked",
-                        side="long",
-                        price=state.last_price,
-                        vwap=vwap,
-                        extension=round(vwap_extension, 1),
-                        msg="BLOCKED: Cannot enter long when >12pts above VWAP — wait for pullback",
-                    )
-                    return
-                if action.side == Side.SHORT and vwap_extension < -12.0:
-                    logger.warning(
-                        "orchestrator.vwap_extension_blocked",
-                        side="short",
-                        price=state.last_price,
-                        vwap=vwap,
-                        extension=round(vwap_extension, 1),
-                        msg="BLOCKED: Cannot enter short when >12pts below VWAP — wait for pullback",
-                    )
-                    return
+        # 4d3. VWAP extension guard — REMOVED
+        # The old 12pt limit blocked all trend day entries. On a 100pt trend day,
+        # price is >12pts from VWAP most of the time. This blocked the system from
+        # participating in the best trading days.
 
-        # 4d4. Momentum exhaustion guard — don't chase one-way moves
-        # If the last 4+ one-minute bars are ALL in the same direction with no
-        # pullback, we're chasing an exhausting move. Wait for a pullback bar.
-        if action.action == ActionType.ENTER and action.side is not None:
-            bars = state.recent_bars
-            if bars and len(bars) >= 4:
-                last_4 = bars[-4:]
-                if action.side == Side.LONG:
-                    all_green = all(
-                        b.get("close", 0) > b.get("open", 0) for b in last_4
-                    )
-                    if all_green:
-                        logger.warning(
-                            "orchestrator.momentum_exhaustion_blocked",
-                            side="long",
-                            bars_checked=4,
-                            msg="BLOCKED: 4+ consecutive green bars — chasing. Wait for pullback.",
-                        )
-                        return
-                elif action.side == Side.SHORT:
-                    all_red = all(
-                        b.get("close", 0) < b.get("open", 0) for b in last_4
-                    )
-                    if all_red:
-                        logger.warning(
-                            "orchestrator.momentum_exhaustion_blocked",
-                            side="short",
-                            bars_checked=4,
-                            msg="BLOCKED: 4+ consecutive red bars — chasing. Wait for pullback.",
-                        )
-                        return
+        # 4d4. Momentum exhaustion guard — REMOVED
+        # 4 consecutive same-direction bars IS the trend, not exhaustion.
+        # This was blocking trend entries during the strongest moves.
 
-        # 4e. Anti-chase guardrail: Block entries near adverse levels
-        # This is a HARD check that the LLM cannot override
+        # 4e. Anti-chase guardrail: Block entries AT the extreme (not near it)
+        # Reduced from 5pts to 3pts — the old 5pt zone was too wide and blocked
+        # valid breakout entries. Only block when literally AT the level.
         if action.action == ActionType.ENTER and action.side is not None:
             price = state.last_price
             if action.side == Side.LONG:
-                # Don't enter long within 5pts of overhead resistance OR at/above it
-                # (buying AT the session high is just as bad as buying 3pts below it)
+                # Don't enter long AT or ABOVE session high (within 3pts)
                 for level_name, level_val in [
                     ("session_high", state.levels.session_high),
-                    ("prior_day_high", state.levels.prior_day_high),
-                    ("overnight_high", state.levels.overnight_high),
                 ]:
-                    if level_val > 0 and abs(level_val - price) <= 5.0:
+                    if level_val > 0 and abs(level_val - price) <= 3.0:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="long",
@@ -1186,34 +1025,15 @@ class TradingOrchestrator:
                             level=level_name,
                             level_val=level_val,
                             distance=round(level_val - price, 2),
-                            msg=f"BLOCKED: Cannot enter long within 5pts of {level_name} resistance",
-                        )
-                        return
-                # Don't enter long when in top 15% of session range
-                # (top 10% was too permissive — 90% of a 100pt range is still
-                # only 10pts from the high, easy to chase)
-                sh = state.levels.session_high
-                sl = state.levels.session_low
-                if sh > 0 and sl > 0 and (sh - sl) > 5:
-                    pct = (price - sl) / (sh - sl)
-                    if pct > 0.85:
-                        logger.warning(
-                            "orchestrator.anti_chase_blocked",
-                            side="long",
-                            price=price,
-                            session_pct=round(pct, 2),
-                            session_range=f"{sl:.1f}-{sh:.1f}",
-                            msg="BLOCKED: Cannot enter long at top 10% of session range",
+                            msg=f"BLOCKED: Cannot enter long within 3pts of {level_name}",
                         )
                         return
             elif action.side == Side.SHORT:
-                # Don't enter short within 5pts of underlying support OR at/below it
+                # Don't enter short AT or BELOW session low (within 3pts)
                 for level_name, level_val in [
                     ("session_low", state.levels.session_low),
-                    ("prior_day_low", state.levels.prior_day_low),
-                    ("overnight_low", state.levels.overnight_low),
                 ]:
-                    if level_val > 0 and abs(price - level_val) <= 5.0:
+                    if level_val > 0 and abs(price - level_val) <= 3.0:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="short",
@@ -1221,22 +1041,7 @@ class TradingOrchestrator:
                             level=level_name,
                             level_val=level_val,
                             distance=round(price - level_val, 2),
-                            msg=f"BLOCKED: Cannot enter short within 5pts of {level_name} support",
-                        )
-                        return
-                # Don't enter short when in bottom 15% of session range
-                sh = state.levels.session_high
-                sl = state.levels.session_low
-                if sh > 0 and sl > 0 and (sh - sl) > 5:
-                    pct = (price - sl) / (sh - sl)
-                    if pct < 0.15:
-                        logger.warning(
-                            "orchestrator.anti_chase_blocked",
-                            side="short",
-                            price=price,
-                            session_pct=round(pct, 2),
-                            session_range=f"{sl:.1f}-{sh:.1f}",
-                            msg="BLOCKED: Cannot enter short at bottom 10% of session range",
+                            msg=f"BLOCKED: Cannot enter short within 3pts of {level_name}",
                         )
                         return
 

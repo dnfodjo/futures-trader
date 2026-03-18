@@ -108,10 +108,10 @@ class TradingConfig(BaseSettings):
     # Max contracts during ETH (overnight) — reduced for thin liquidity
     max_contracts_eth: int = 3
 
-    # Max trades per 23h session (18:05→16:55)
-    # With all sessions (Asian, London, Pre-RTH, RTH, Post-RTH),
-    # the system can easily take 20+ trades across 23 hours.
-    max_daily_trades: int = 24
+    # Max trades per session — REDUCED from 24 to 8
+    # Professional scalpers take 3-5 trades. More trades = more commissions
+    # and more exposure to marginal setups. Quality over quantity.
+    max_daily_trades: int = 8
 
     # News blackout
     news_blackout_before_min: int = 5
@@ -150,12 +150,12 @@ class TradingConfig(BaseSettings):
     # give back all profits. Asian moves are 8-15pts, London 10-20pts.
     # Trail = 6pts means we keep 2-14pts of an 8-20pt move (vs 0-7pts with 5pt trail).
     # Initial stop at 6pts risks $24/trade (2 contracts) — acceptable.
-    eth_trail_distance: float = 6.0  # 6pts (keep more of 8-15pt ETH moves)
-    eth_trail_activation_points: float = 3.0  # activate at 3pts (not too early)
-    eth_mid_tighten_at_profit: float = 6.0  # mid-tier at 6pts profit
-    eth_mid_tightened_distance: float = 5.0  # mid distance 5pts (lock 1pt+)
-    eth_tighten_at_profit: float = 10.0  # tight-tier at 10pts profit
-    eth_tightened_distance: float = 4.0  # tight distance 4pts (lock 6pt+)
+    eth_trail_distance: float = 8.0  # was 6 — wider trail to survive normal pullbacks
+    eth_trail_activation_points: float = 6.0  # was 3 — don't trail until real profit
+    eth_mid_tighten_at_profit: float = 12.0  # was 6 — tighten later, not immediately
+    eth_mid_tightened_distance: float = 6.0  # was 5 — still give room at mid profit
+    eth_tighten_at_profit: float = 18.0  # was 10 — only tight trail on big winners
+    eth_tightened_distance: float = 5.0  # was 4 — don't choke big winners
     eth_max_stop_points: float = 12.0  # max 12pt stop during ETH (vs 25pt RTH)
 
     # Stop hunt avoidance
