@@ -35,7 +35,6 @@ class PreMarketContext:
     reduce_size: bool = False
     widen_stops: bool = False
     min_confluence_override: int | None = None
-    near_rollover: bool = False  # True if within 3 days of contract roll
     notes: str = ""
 
     def __post_init__(self):
@@ -65,17 +64,11 @@ class PreMarketContextGenerator:
         """Run at ~9:15 AM ET. Returns PreMarketContext."""
         try:
             calendar = self._load_calendar()
-            near_rollover = self._check_contract_rollover(calendar)
             prompt = self._build_prompt(calendar)
 
             if self._llm is None:
                 logger.warning("pre_market.no_llm_client", msg="Using defaults")
-                ctx = PreMarketContext.default()
-                ctx.near_rollover = near_rollover
-                if near_rollover:
-                    ctx.reduce_size = True
-                    ctx.events.append("Contract rollover (within 3 days)")
-                return ctx
+                return PreMarketContext.default()
 
             response = await self._llm.call(
                 system="You are a pre-market economic calendar analyst. Return ONLY valid JSON.",
@@ -99,13 +92,6 @@ class PreMarketContextGenerator:
             filtered = {k: v for k, v in parsed.items() if k in valid_fields}
             ctx = PreMarketContext(**filtered)
 
-            # Apply contract rollover override (mechanical, not LLM-dependent)
-            if near_rollover:
-                ctx.near_rollover = True
-                ctx.reduce_size = True
-                if "Contract rollover" not in " ".join(ctx.events):
-                    ctx.events.append("Contract rollover (within 3 days)")
-
             logger.info(
                 "pre_market.context_generated",
                 events=ctx.events,
@@ -113,7 +99,6 @@ class PreMarketContextGenerator:
                 no_trade_windows=ctx.no_trade_windows,
                 reduce_size=ctx.reduce_size,
                 min_confluence_override=ctx.min_confluence_override,
-                near_rollover=ctx.near_rollover,
             )
             return ctx
 
@@ -155,49 +140,6 @@ class PreMarketContextGenerator:
             del data[key]
 
         return data
-
-    def _check_contract_rollover(self, calendar: dict) -> bool:
-        """Check if today is within 3 days of a contract rollover.
-
-        MNQ rolls quarterly: 3rd Friday of March, June, September, December.
-        Also checks calendar for explicit rollover entries.
-        """
-        today = datetime.now(ET).date()
-
-        # Check calendar for explicit rollover entries
-        today_str = today.strftime("%Y-%m-%d")
-        for event in calendar.get(today_str, []):
-            if isinstance(event, dict) and "rollover" in event.get("event", "").lower():
-                return True
-
-        # Compute 3rd Friday of quarterly months
-        import calendar as cal_mod
-
-        roll_months = [3, 6, 9, 12]
-        for month in roll_months:
-            # Try current year and next year
-            for year in [today.year, today.year + 1]:
-                # Find 3rd Friday: first day of month, find first Friday, add 14 days
-                first_day_weekday = cal_mod.weekday(year, month, 1)  # 0=Mon, 4=Fri
-                # Days until first Friday
-                days_to_friday = (4 - first_day_weekday) % 7
-                third_friday_day = 1 + days_to_friday + 14
-                try:
-                    from datetime import date
-                    roll_date = date(year, month, third_friday_day)
-                except ValueError:
-                    continue
-
-                days_until_roll = (roll_date - today).days
-                if 0 <= days_until_roll <= 3:
-                    logger.info(
-                        "pre_market.near_rollover",
-                        roll_date=roll_date.isoformat(),
-                        days_until=days_until_roll,
-                    )
-                    return True
-
-        return False
 
     def _build_prompt(self, calendar: dict) -> str:
         """Build the LLM prompt for pre-market analysis."""
