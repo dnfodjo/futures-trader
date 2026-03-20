@@ -33,6 +33,7 @@ from src.core.types import (
 from src.guardrails.position_limits import PositionLimitGuardrail
 from src.guardrails.risk_checks import RiskCheckGuardrail
 from src.guardrails.session_rules import SessionRuleGuardrail
+from src.guardrails.trade_quality import TradeQualityGuardrail
 
 logger = structlog.get_logger()
 
@@ -54,15 +55,15 @@ class GuardrailEngine:
         event_bus: EventBus,
         max_contracts: int = 6,
         max_adds: int = 3,
-        min_stop_distance: float = 10.0,
+        min_stop_distance: float = 15.0,
         max_stop_distance: float = 25.0,
         max_stop_distance_eth: float = 12.0,
-        min_confidence: float = 0.3,
+        min_confidence: float = 0.65,
         min_entry_spacing_pts: float = 5.0,
         max_consecutive_losers: int = 4,
         daily_loss_limit: float = 400.0,
         blackout_minutes: int = 5,
-        max_daily_trades: int = 12,
+        max_daily_trades: int = 6,
         max_contracts_eth: int = 2,
     ) -> None:
         self._bus = event_bus
@@ -85,6 +86,7 @@ class GuardrailEngine:
             min_confidence=min_confidence,
             min_entry_spacing_pts=min_entry_spacing_pts,
         )
+        self._trade_quality = TradeQualityGuardrail()
 
         # Stats
         self._checks_run: int = 0
@@ -168,6 +170,15 @@ class GuardrailEngine:
 
         # 3. Risk checks
         result = self._risk_checks.check(
+            action=action,
+            state=state,
+            position=position,
+        )
+        if not result.allowed:
+            return self._record_block(result)
+
+        # 4. Trade quality (RSI, session extremes, EMA pullback)
+        result = self._trade_quality.check(
             action=action,
             state=state,
             position=position,

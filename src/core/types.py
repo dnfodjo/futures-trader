@@ -32,6 +32,11 @@ class ActionType(str, Enum):
     FLATTEN = "FLATTEN"
     DO_NOTHING = "DO_NOTHING"
     STOP_TRADING = "STOP_TRADING"
+    # New confluence-based actions
+    LONG = "LONG"
+    SHORT = "SHORT"
+    EXIT = "EXIT"
+    FLAT = "FLAT"
 
 
 class Regime(str, Enum):
@@ -118,6 +123,13 @@ class KeyLevels(BaseModel):
     poc: float = 0.0  # point of control (highest volume price)
     value_area_high: float = 0.0
     value_area_low: float = 0.0
+    # Per-session highs/lows for liquidity sweep targets
+    asian_high: float = 0.0
+    asian_low: float = 0.0
+    london_high: float = 0.0
+    london_low: float = 0.0
+    ny_high: float = 0.0
+    ny_low: float = 0.0
 
 
 class OrderFlowData(BaseModel):
@@ -129,6 +141,13 @@ class OrderFlowData(BaseModel):
     volume_1min: int = 0
     large_lot_count_5min: int = 0
     tape_speed: float = 0.0  # trades per second
+    # Order flow metrics from L2 data (mbp-10)
+    dom_imbalance: float = 1.0  # bid_size_total / ask_size_total; >1.3=bullish, <0.7=bearish
+    entropy: float = 0.5  # Shannon entropy 0-1; <0.4=trending, >0.7=choppy, >0.85=hard block
+    vpin: float = 0.0  # volume-sync probability of informed trading; >0.6=institutional
+    absorption_detected: bool = False
+    absorption_side: str = ""  # "bid" (bullish) or "ask" (bearish)
+    dom_data_available: bool = False  # True only when mbp-10 depth has been received
 
 
 class CrossMarketContext(BaseModel):
@@ -225,6 +244,11 @@ class LLMAction(BaseModel):
     setup_type: Optional[str] = None  # which setup pattern is being played
     model_used: str = "haiku"
     latency_ms: int = 0
+    # Confluence-based fields
+    primary_timeframe: Optional[str] = None  # "1m", "5m", "15m", "30m"
+    confluence_factors: list[str] = Field(default_factory=list)  # e.g., ["trend_bull", "ob_tap", "volume"]
+    order_flow_assessment: str = ""  # LLM's interpretation of order flow data
+    risk_flags: list[str] = Field(default_factory=list)  # e.g., ["entropy_elevated", "fast_market"]
 
 
 # ── MarketState (the complete snapshot sent to the LLM) ────────────────────────
@@ -314,6 +338,17 @@ class MarketState(BaseModel):
     # Session game plan from pre-market analysis
     game_plan: str = ""
 
+    # ── Confluence + Order Flow (new strategy) ──
+    # Multi-timeframe bars: {"5m": [...], "15m": [...], "30m": [...]}
+    multi_tf_bars: dict = Field(default_factory=dict, exclude=True)
+    # Multi-timeframe EMAs: {"5m": {"ema_9": float, "ema_50": float}, ...}
+    multi_tf_emas: dict = Field(default_factory=dict)
+    # Confluence scoring output
+    confluence_score: int = 0  # 0-6 points
+    confluence_breakdown: dict = Field(default_factory=dict)  # per-factor details
+    # Market speed state
+    market_speed_state: str = "NORMAL"  # "SLOW", "NORMAL", "FAST"
+
     def to_llm_dict(self) -> dict:
         """Serialize to a flat, token-efficient dict for LLM consumption.
 
@@ -348,7 +383,11 @@ class MarketState(BaseModel):
             "flow": {
                 k: v
                 for k, v in self.flow.model_dump().items()
-                if v not in (0.0, 0, "neutral", 1.0)
+                if not (
+                    # Strip default/neutral numeric values but preserve booleans
+                    (isinstance(v, bool) and v is False)
+                    or (not isinstance(v, bool) and v in (0.0, 0, "neutral", 1.0))
+                )
             },
             "pnl": {
                 "daily": self.daily_pnl,
@@ -574,6 +613,19 @@ class MarketState(BaseModel):
                 }
                 for t in self.recent_trades[-5:]  # last 5 max
             ]
+
+        # ── Confluence + Order Flow (new strategy fields) ──
+        if self.confluence_score > 0:
+            d["confluence_score"] = self.confluence_score
+            d["confluence_breakdown"] = self.confluence_breakdown
+        if self.multi_tf_emas:
+            d["multi_tf_emas"] = self.multi_tf_emas
+        if self.market_speed_state != "NORMAL":
+            d["market_speed_state"] = self.market_speed_state
+
+        # DOM data availability flag — lets LLM know if DOM data is real or default
+        if not self.flow.dom_data_available:
+            d.setdefault("flow", {})["dom_data_available"] = False
 
         return d
 

@@ -81,10 +81,8 @@ class Reasoner:
         action = await reasoner.decide(market_state)
     """
 
-    # Temperature settings for different contexts
-    TEMP_ROUTINE: float = 0.0  # No position, no setups — deterministic DO_NOTHING
-    TEMP_ACTIVE: float = 0.2  # In position or near levels — slight exploration
-    TEMP_ENTRY: float = 0.15  # Entry decisions — low temp for consistency
+    # Always temperature 0.0 — the LLM is a validation engine, not a creative agent
+    TEMP: float = 0.0
 
     def __init__(
         self,
@@ -137,36 +135,36 @@ class Reasoner:
         state: MarketState,
         game_plan: str = "",
         extra_context: str = "",
-        detected_setups: str = "",
-        price_action_narrative: str = "",
+        confluence_data: str = "",
+        order_flow_data: str = "",
     ) -> LLMAction:
-        """Make a trading decision based on the current market state.
+        """Validate a pre-qualified setup and assign confidence.
+
+        The confluence engine has already scored the setup above the session
+        minimum. The LLM synthesizes all data and gives final go/no-go.
 
         Args:
             state: Complete MarketState snapshot.
             game_plan: Pre-market game plan text.
-            extra_context: Any additional context (e.g., recent debate result).
-            detected_setups: Pre-screened setup descriptions from SetupDetector.
-            price_action_narrative: Rich text narrative from PriceActionAnalyzer.
+            extra_context: Any additional context (decision memory, postmortem).
+            confluence_data: JSON of confluence scoring breakdown.
+            order_flow_data: JSON of order flow snapshot.
 
         Returns:
             LLMAction with the decision and reasoning.
         """
-        # Choose model based on context
-        model = self._select_model(state)
+        # Always Sonnet — LLM only gets called when setup is pre-qualified
+        model = "sonnet"
 
-        # Choose temperature based on context (adaptive)
-        temperature = self._select_temperature(state, detected_setups)
-
-        # Build enriched extra context with decision memory + level memory + postmortem
+        # Build enriched extra context with decision memory + postmortem
         enriched_context = self._build_enriched_context(state, extra_context)
 
         # Build system prompt with caching
         system = build_system_blocks(
             game_plan=game_plan,
             extra_context=enriched_context,
-            detected_setups=detected_setups,
-            price_action_narrative=price_action_narrative,
+            confluence_data=confluence_data,
+            order_flow_data=order_flow_data,
         )
 
         # Build user message with market state
@@ -174,7 +172,7 @@ class Reasoner:
         messages = [
             {
                 "role": "user",
-                "content": f"Current market state:\n```json\n{state_json}\n```\n\nWhat is your trading decision?",
+                "content": f"Current market state:\n```json\n{state_json}\n```\n\nValidate this setup and provide your confidence score.",
             }
         ]
 
@@ -186,14 +184,14 @@ class Reasoner:
                 tools=[TRADING_DECISION_TOOL],
                 tool_choice={"type": "tool", "name": "trading_decision"},
                 max_tokens=512,
-                temperature=temperature,
+                temperature=self.TEMP,
             )
 
             action = self._parse_action(response, model)
             self._decision_count += 1
             self._consecutive_parse_errors = 0
 
-            if action.action == ActionType.DO_NOTHING:
+            if action.action in (ActionType.DO_NOTHING, ActionType.FLAT):
                 self._do_nothing_count += 1
 
             # Record this decision in memory for future context
@@ -228,34 +226,12 @@ class Reasoner:
             logger.exception("reasoner.unexpected_error")
             return self._safe_fallback(model, str(e))
 
-    # ── Adaptive Temperature ──────────────────────────────────────────────────
+    # ── Temperature (fixed at 0.0 — validation engine) ────────────────────────
 
-    def _select_temperature(self, state: MarketState, detected_setups: str) -> float:
-        """Choose temperature based on decision context.
-
-        Lower temperature = more deterministic, less creative.
-        - Routine scans (no position, no setups): 0.0 — we want consistent DO_NOTHING
-        - Active management (in position): 0.2 — need nuance in position management
-        - Entry decisions (setups detected): 0.15 — want consistency but some flexibility
+    def _select_temperature(self, state: MarketState, detected_setups: str = "") -> float:
+        """Always 0.0 — the LLM is a validation engine, not a creative agent.
         """
-        # In position — need nuanced management
-        if state.position is not None:
-            return self.TEMP_ACTIVE
-
-        # Setups detected — potential entry
-        if detected_setups:
-            return self.TEMP_ENTRY
-
-        # Near a key level — elevated attention
-        if state.last_price > 0 and hasattr(state, "levels"):
-            level_data = state.levels.model_dump()
-            for val in level_data.values():
-                if isinstance(val, (int, float)) and val > 0:
-                    if abs(state.last_price - val) <= 5.0:
-                        return self.TEMP_ENTRY
-
-        # Routine scan — want deterministic DO_NOTHING
-        return self.TEMP_ROUTINE
+        return self.TEMP
 
     # ── Context Enrichment ────────────────────────────────────────────────────
 
@@ -316,57 +292,12 @@ class Reasoner:
     # ── Model Selection ──────────────────────────────────────────────────────
 
     def _select_model(self, state: MarketState) -> str:
-        """Choose model based on context.
+        """Always Sonnet — LLM only gets called when setup is pre-qualified.
 
-        Model selection directly impacts decision quality vs cost:
-        - Sonnet: Better at identifying subtle setups and managing positions.
-          Used in all high-stakes situations.
-        - Haiku: Fast and cheap for "is anything happening?" checks during
-          low-activity periods when flat.
-
-        Approximate cost: Sonnet ~$0.003/call, Haiku ~$0.0003/call (with caching).
-        At 30s intervals over 23 hours: blended approach targets ~$3-5/day.
+        The confluence engine gates LLM calls, so we use the best model
+        every time. Cost is lower because calls are much less frequent.
         """
-        # Always Sonnet when in a position (managing risk is high-stakes)
-        if state.position is not None:
-            return "sonnet"
-
-        # Sonnet during high-activity RTH phases (entries are most likely)
-        if state.session_phase.value in ("open_drive", "close"):
-            return "sonnet"
-
-        # Sonnet during morning session (best RTH trading window)
-        if state.session_phase.value == "morning":
-            return "sonnet"
-
-        # Sonnet during afternoon (institutional flow — real moves)
-        if state.session_phase.value == "afternoon":
-            return "sonnet"
-
-        # Sonnet during London session (cleanest trends of the day)
-        if state.session_phase.value == "london":
-            return "sonnet"
-
-        # Sonnet during pre-RTH (econ data drops at 8:30)
-        if state.session_phase.value == "pre_rth":
-            return "sonnet"
-
-        # Sonnet in blackout (need careful "do nothing" decision)
-        if state.in_blackout:
-            return "sonnet"
-
-        # Sonnet when at a decision point (near a key level)
-        if state.last_price > 0:
-            level_data = state.levels.model_dump()
-            for val in level_data.values():
-                if val > 0 and abs(state.last_price - val) <= 5.0:
-                    return "sonnet"
-
-        # Haiku for low-probability scan periods when flat and away from levels:
-        # - Asian session (thin, mostly drift)
-        # - Midday chop zone
-        # - Post-RTH (thin, unwinding)
-        return "haiku"
+        return "sonnet"
 
     # ── Response Parsing ─────────────────────────────────────────────────────
 
@@ -394,36 +325,39 @@ class Reasoner:
             )
 
         try:
-            action_str = tool_input.get("action", "DO_NOTHING")
+            action_str = tool_input.get("action", "FLAT")
             action_type = ActionType(action_str)
 
-            # Parse optional fields
+            # Derive side from action for new confluence-based actions
             side = None
-            if "side" in tool_input and tool_input["side"]:
+            if action_type == ActionType.LONG:
+                side = Side.LONG
+            elif action_type == ActionType.SHORT:
+                side = Side.SHORT
+            elif "side" in tool_input and tool_input["side"]:
                 side = Side(tool_input["side"])
 
-            quantity = tool_input.get("quantity")
-            stop_distance = tool_input.get("stop_distance")
-            new_stop_price = tool_input.get("new_stop_price")
             reasoning = tool_input.get("reasoning", "")
             confidence = float(tool_input.get("confidence", 0.5))
-
-            # Clamp confidence
             confidence = max(0.0, min(1.0, confidence))
 
-            setup_type = tool_input.get("setup_type")
+            # New confluence fields
+            primary_timeframe = tool_input.get("primary_timeframe")
+            confluence_factors = tool_input.get("confluence_factors", [])
+            order_flow_assessment = tool_input.get("order_flow_assessment", "")
+            risk_flags = tool_input.get("risk_flags", [])
 
             return LLMAction(
                 action=action_type,
                 side=side,
-                quantity=quantity,
-                stop_distance=stop_distance,
-                new_stop_price=new_stop_price,
                 reasoning=reasoning,
                 confidence=confidence,
-                setup_type=setup_type,
                 model_used=model,
                 latency_ms=response.latency_ms,
+                primary_timeframe=primary_timeframe,
+                confluence_factors=confluence_factors,
+                order_flow_assessment=order_flow_assessment,
+                risk_flags=risk_flags,
             )
 
         except (ValueError, KeyError, TypeError) as e:
@@ -443,12 +377,12 @@ class Reasoner:
             )
 
     def _safe_fallback(self, model: str, error: str) -> LLMAction:
-        """Return a safe DO_NOTHING action on unrecoverable errors."""
+        """Return a safe FLAT action on unrecoverable errors."""
         self._parse_error_count += 1
         self._consecutive_parse_errors += 1
         return LLMAction(
-            action=ActionType.DO_NOTHING,
-            reasoning=f"LLM error — defaulting to DO_NOTHING: {error}",
+            action=ActionType.FLAT,
+            reasoning=f"LLM error — defaulting to FLAT: {error}",
             confidence=0.0,
             model_used=model,
         )

@@ -70,12 +70,19 @@ _MOMENTUM_THRESHOLD = 5.0  # points of directional move to call "momentum"
 
 
 def _compute_ema(prices: list[float], period: int) -> float:
-    """Compute EMA from a list of prices. Returns 0 if insufficient data."""
-    if len(prices) < period:
+    """Compute EMA from a list of prices.
+
+    When fewer bars than *period* are available (but at least 3), seeds
+    with an SMA of whatever bars exist so that higher-TF EMAs can start
+    contributing to trend scoring during warm-up instead of returning 0.
+    """
+    n = len(prices)
+    if n < 3:
         return 0.0
+    seed_len = min(period, n)  # use full period or whatever we have
     multiplier = 2.0 / (period + 1)
-    ema = sum(prices[:period]) / period  # SMA seed
-    for price in prices[period:]:
+    ema = sum(prices[:seed_len]) / seed_len  # SMA seed
+    for price in prices[seed_len:]:
         ema = (price - ema) * multiplier + ema
     return round(ema, 2)
 
@@ -305,6 +312,30 @@ class StateEngine:
         self._current_1min_bar: Optional[dict] = None
         self._1min_bar_start: Optional[datetime] = None
 
+        # Multi-timeframe bars (aggregated from 1min)
+        self._5min_bars: list[dict] = []
+        self._15min_bars: list[dict] = []
+        self._30min_bars: list[dict] = []
+        self._current_5min_bar: Optional[dict] = None
+        self._current_15min_bar: Optional[dict] = None
+        self._current_30min_bar: Optional[dict] = None
+
+        # Per-session high/low tracking for liquidity sweep targets
+        self._asian_high: float = 0.0
+        self._asian_low: float = float("inf")
+        self._london_high: float = 0.0
+        self._london_low: float = float("inf")
+        self._ny_high: float = 0.0
+        self._ny_low: float = float("inf")
+        self._last_session_phase: Optional[SessionPhase] = None
+
+        # Confluence + order flow engine references (set externally)
+        self._confluence_engine: Any = None
+        self._order_flow_engine: Any = None
+
+        # Callbacks for higher-TF bar completions
+        self._on_5min_bar_callbacks: list = []
+
         # Opening range tracking (9:30-9:45 ET)
         self._opening_range_high: float = 0.0
         self._opening_range_low: float = float("inf")
@@ -439,6 +470,223 @@ class StateEngine:
         """
         self._is_critical = is_critical
 
+    def set_confluence_engine(self, engine: Any) -> None:
+        """Wire the ConfluenceEngine for scoring updates."""
+        self._confluence_engine = engine
+
+    def set_order_flow_engine(self, engine: Any) -> None:
+        """Wire the OrderFlowEngine for order flow snapshots."""
+        self._order_flow_engine = engine
+
+    def on_5min_bar(self, callback) -> None:
+        """Register a callback for 5-minute bar completions."""
+        self._on_5min_bar_callbacks.append(callback)
+
+    # ── Multi-TF Bar Aggregation ──────────────────────────────────────────────
+
+    def _finalize_1min_bar(self, bar: dict) -> None:
+        """Finalize a 1-min bar: store, aggregate to higher TFs, update session H/L."""
+        self._1min_bars.append(bar)
+        if len(self._1min_bars) > 1500:
+            self._1min_bars = self._1min_bars[-1500:]
+        if len(self._1min_bars) % _BAR_PERSIST_INTERVAL == 0:
+            self._persist_bars()
+
+        # Update per-session high/low
+        self._update_session_highs_lows(bar)
+
+        # Update confluence engine with new bar
+        if self._confluence_engine is not None:
+            atr = _compute_atr(self._1min_bars[-15:]) if len(self._1min_bars) >= 15 else 0.0
+            self._confluence_engine.update(self._1min_bars, atr)
+
+        # Aggregate into higher-TF bars
+        self._aggregate_to_higher_tf(bar)
+
+    def _aggregate_to_higher_tf(self, bar_1m: dict) -> None:
+        """Aggregate a finalized 1min bar into 5m, 15m, 30m bars.
+
+        Uses clock-aligned boundaries (not count-based) so bars always close
+        on :00/:05/:10/... regardless of when the system started.
+        """
+        # Extract minute from bar timestamp for clock alignment
+        bar_minute = self._extract_minute(bar_1m)
+
+        # 5-minute bars — close on :04, :09, :14, :19, :24, :29, etc.
+        self._update_htf_bar(bar_1m, "_current_5min_bar", self._5min_bars, 5, bar_minute)
+        # 15-minute bars — close on :14, :29, :44, :59
+        self._update_htf_bar(bar_1m, "_current_15min_bar", self._15min_bars, 15, bar_minute)
+        # 30-minute bars — close on :29, :59
+        self._update_htf_bar(bar_1m, "_current_30min_bar", self._30min_bars, 30, bar_minute)
+
+    @staticmethod
+    def _extract_minute(bar: dict) -> int:
+        """Extract the minute component from a bar's timestamp."""
+        ts = bar.get("timestamp")
+        if ts is None:
+            return -1
+        if isinstance(ts, str):
+            # Format: "2024-01-15T09:35:00-05:00" or "2024-01-15 09:35:00"
+            try:
+                # Find the minute part — look for HH:MM pattern
+                colon_idx = ts.index(":")
+                return int(ts[colon_idx + 1 : colon_idx + 3])
+            except (ValueError, IndexError):
+                return -1
+        elif hasattr(ts, "minute"):
+            return ts.minute
+        return -1
+
+    def _update_htf_bar(
+        self, bar_1m: dict, current_attr: str, bar_list: list, period: int, bar_minute: int
+    ) -> None:
+        """Update or finalize a higher-timeframe bar from a 1min bar.
+
+        Uses clock-aligned boundaries: a 5m bar closes when bar_minute % 5 == 4
+        (i.e., the bar starting at :04 is the last bar in the :00-:04 group).
+        """
+        current = getattr(self, current_attr)
+        if current is None:
+            # Start a new HTF bar
+            setattr(self, current_attr, {
+                "timestamp": bar_1m["timestamp"],
+                "open": bar_1m["open"],
+                "high": bar_1m["high"],
+                "low": bar_1m["low"],
+                "close": bar_1m["close"],
+                "volume": bar_1m.get("volume", 0),
+                "buy_volume": bar_1m.get("buy_volume", 0),
+                "sell_volume": bar_1m.get("sell_volume", 0),
+            })
+        else:
+            # Update the current HTF bar
+            current["high"] = max(current["high"], bar_1m["high"])
+            current["low"] = min(current["low"], bar_1m["low"])
+            current["close"] = bar_1m["close"]
+            current["volume"] = current.get("volume", 0) + bar_1m.get("volume", 0)
+            current["buy_volume"] = current.get("buy_volume", 0) + bar_1m.get("buy_volume", 0)
+            current["sell_volume"] = current.get("sell_volume", 0) + bar_1m.get("sell_volume", 0)
+
+        # Check clock alignment: finalize when this is the last minute of the period
+        # e.g., for 5m: minute 4, 9, 14, 19, 24, 29... (minute % 5 == 4)
+        # For 15m: minute 14, 29, 44, 59 (minute % 15 == 14)
+        # For 30m: minute 29, 59 (minute % 30 == 29)
+        # If bar_minute is -1 (unparseable), fall back to never finalizing
+        # until a parseable bar arrives.
+        if bar_minute >= 0 and bar_minute % period == period - 1:
+            current = getattr(self, current_attr)
+            if current is not None:
+                finalized = dict(current)
+                bar_list.append(finalized)
+                # Keep max 120 bars per TF
+                if len(bar_list) > 120:
+                    del bar_list[:-120]
+
+                # Fire 5min callback for orchestrator
+                if period == 5:
+                    for cb in self._on_5min_bar_callbacks:
+                        try:
+                            cb(finalized)
+                        except Exception:
+                            logger.exception("state_engine.5min_bar_callback_error")
+
+                # Reset for next HTF bar
+                setattr(self, current_attr, None)
+
+    # ── Per-Session High/Low Tracking ─────────────────────────────────────────
+
+    def _update_session_highs_lows(self, bar: dict) -> None:
+        """Track per-session H/L. On session transition, freeze previous session's levels."""
+        phase = clock.get_session_phase()
+        high = bar["high"]
+        low = bar["low"]
+
+        # Detect session transition — freeze previous session's levels
+        if self._last_session_phase is not None and phase != self._last_session_phase:
+            prev = self._last_session_phase
+            if prev == SessionPhase.ASIAN:
+                logger.info(
+                    "state_engine.session_hl_frozen",
+                    session="asian",
+                    high=self._asian_high,
+                    low=self._asian_low if self._asian_low != float("inf") else 0.0,
+                )
+            elif prev == SessionPhase.LONDON:
+                logger.info(
+                    "state_engine.session_hl_frozen",
+                    session="london",
+                    high=self._london_high,
+                    low=self._london_low if self._london_low != float("inf") else 0.0,
+                )
+            elif prev in (
+                SessionPhase.OPEN_DRIVE, SessionPhase.MORNING,
+                SessionPhase.MIDDAY, SessionPhase.AFTERNOON, SessionPhase.CLOSE,
+            ):
+                # NY session — freeze on transition to POST_RTH
+                if phase == SessionPhase.POST_RTH:
+                    logger.info(
+                        "state_engine.session_hl_frozen",
+                        session="ny",
+                        high=self._ny_high,
+                        low=self._ny_low if self._ny_low != float("inf") else 0.0,
+                    )
+
+        self._last_session_phase = phase
+
+        # Update current session H/L
+        if phase == SessionPhase.ASIAN:
+            self._asian_high = max(self._asian_high, high)
+            self._asian_low = min(self._asian_low, low)
+        elif phase == SessionPhase.LONDON:
+            self._london_high = max(self._london_high, high)
+            self._london_low = min(self._london_low, low)
+        elif phase in (
+            SessionPhase.OPEN_DRIVE, SessionPhase.MORNING,
+            SessionPhase.MIDDAY, SessionPhase.AFTERNOON, SessionPhase.CLOSE,
+        ):
+            self._ny_high = max(self._ny_high, high)
+            self._ny_low = min(self._ny_low, low)
+
+    def _replay_session_hl(self, bar: dict) -> None:
+        """Replay session H/L from a persisted bar using its timestamp for phase classification.
+
+        Unlike _update_session_highs_lows which uses wall-clock time, this method
+        parses the bar's timestamp to determine the correct session phase.
+        Used during warm_1min_bars() replay to restore session levels after restart.
+        """
+        ts = bar.get("timestamp")
+        if ts is None:
+            return
+        try:
+            if isinstance(ts, str):
+                bar_dt = datetime.fromisoformat(ts)
+            elif hasattr(ts, "hour"):
+                bar_dt = ts
+            else:
+                return
+            # Ensure timezone-aware
+            if bar_dt.tzinfo is None:
+                bar_dt = bar_dt.replace(tzinfo=UTC)
+        except (ValueError, TypeError):
+            return
+
+        phase = clock.get_session_phase(bar_dt)
+        high = bar.get("high", 0.0)
+        low = bar.get("low", float("inf"))
+
+        if phase == SessionPhase.ASIAN:
+            self._asian_high = max(self._asian_high, high)
+            self._asian_low = min(self._asian_low, low)
+        elif phase == SessionPhase.LONDON:
+            self._london_high = max(self._london_high, high)
+            self._london_low = min(self._london_low, low)
+        elif phase in (
+            SessionPhase.OPEN_DRIVE, SessionPhase.MORNING,
+            SessionPhase.MIDDAY, SessionPhase.AFTERNOON, SessionPhase.CLOSE,
+        ):
+            self._ny_high = max(self._ny_high, high)
+            self._ny_low = min(self._ny_low, low)
+
     # ── Bar Callback ─────────────────────────────────────────────────────────
 
     async def on_bar_completed(self, bar: OHLCVBar) -> None:
@@ -461,16 +709,12 @@ class StateEngine:
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "buy_volume": bar.buy_volume,
+                "sell_volume": bar.sell_volume,
             }
         elif (now - self._1min_bar_start).total_seconds() >= 60:
             # Finalize the current 1-min bar
-            self._1min_bars.append(self._current_1min_bar)
-            # Keep max 120 bars (2 hours of 1-min data) for indicators
-            if len(self._1min_bars) > 120:
-                self._1min_bars = self._1min_bars[-120:]
-            # Persist to disk periodically for restart recovery
-            if len(self._1min_bars) % _BAR_PERSIST_INTERVAL == 0:
-                self._persist_bars()
+            self._finalize_1min_bar(self._current_1min_bar)
             # Start new bar
             self._1min_bar_start = now
             self._current_1min_bar = {
@@ -480,6 +724,8 @@ class StateEngine:
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "buy_volume": bar.buy_volume,
+                "sell_volume": bar.sell_volume,
             }
         else:
             # Update the current 1-min bar
@@ -487,6 +733,8 @@ class StateEngine:
             self._current_1min_bar["low"] = min(self._current_1min_bar["low"], bar.low)
             self._current_1min_bar["close"] = bar.close
             self._current_1min_bar["volume"] = self._current_1min_bar.get("volume", 0) + bar.volume
+            self._current_1min_bar["buy_volume"] = self._current_1min_bar.get("buy_volume", 0) + bar.buy_volume
+            self._current_1min_bar["sell_volume"] = self._current_1min_bar.get("sell_volume", 0) + bar.sell_volume
 
         # ── Track opening range (9:30-9:45 ET) ──
         if not self._opening_range_set:
@@ -650,7 +898,7 @@ class StateEngine:
                 recent_bars=[
                     b.model_dump() for b in self._recent_bars
                 ],
-                recent_1min_bars=self._1min_bars[-10:],  # last 10 1-min bars for LLM
+                recent_1min_bars=self._1min_bars[-120:],  # full buffer for confluence engine
                 recent_trades=self._recent_trades[-5:],
                 game_plan=self._game_plan,
                 # Technical indicators
@@ -662,7 +910,27 @@ class StateEngine:
                 pivot_levels=self._pivot_levels,
                 rsi=rsi,
                 macd=macd,
+                # ── New confluence strategy fields ──
+                multi_tf_bars={
+                    "5m": self._5min_bars[-30:],
+                    "15m": self._15min_bars[-20:],
+                    "30m": self._30min_bars[-10:],
+                },
+                multi_tf_emas=self._compute_multi_tf_emas(),
+                confluence_score=0,  # computed by orchestrator via ConfluenceEngine
+                confluence_breakdown={},
+                market_speed_state="NORMAL",
             )
+
+            # Enrich order flow with L2 data if available
+            if self._order_flow_engine is not None:
+                of_snap = self._order_flow_engine.snapshot()
+                state.flow.dom_imbalance = of_snap.get("dom_imbalance", 1.0)
+                state.flow.entropy = of_snap.get("entropy", 0.5)
+                state.flow.vpin = of_snap.get("vpin", 0.0)
+                state.flow.absorption_detected = of_snap.get("absorption_detected", False)
+                state.flow.absorption_side = of_snap.get("absorption_side", "")
+                state.flow.dom_data_available = of_snap.get("dom_data_available", False)
 
             return state
 
@@ -715,6 +983,13 @@ class StateEngine:
             poc=tick_snap["poc"],
             value_area_high=va_high,
             value_area_low=va_low,
+            # Per-session H/L for liquidity sweep targets
+            asian_high=self._asian_high if self._asian_high > 0 else 0.0,
+            asian_low=self._asian_low if self._asian_low < float("inf") else 0.0,
+            london_high=self._london_high if self._london_high > 0 else 0.0,
+            london_low=self._london_low if self._london_low < float("inf") else 0.0,
+            ny_high=self._ny_high if self._ny_high > 0 else 0.0,
+            ny_low=self._ny_low if self._ny_low < float("inf") else 0.0,
         )
 
     def _build_order_flow(
@@ -835,6 +1110,28 @@ class StateEngine:
         market_structure = _detect_market_structure(bars, min_swing_pts=3.0)
 
         return emas, rsi, macd, atr, market_structure
+
+    def _compute_multi_tf_emas(self) -> dict:
+        """Compute EMA 9 and EMA 50 for 5m, 15m, 30m bars.
+
+        Returns:
+            {"5m": {"ema_9": float, "ema_50": float}, "15m": {...}, "30m": {...}}
+        """
+        result = {}
+        for tf_label, bars in [
+            ("5m", self._5min_bars),
+            ("15m", self._15min_bars),
+            ("30m", self._30min_bars),
+        ]:
+            if not bars:
+                result[tf_label] = {"ema_9": 0.0, "ema_50": 0.0}
+                continue
+            closes = [b["close"] for b in bars]
+            result[tf_label] = {
+                "ema_9": _compute_ema(closes, 9),
+                "ema_50": _compute_ema(closes, 50),
+            }
+        return result
 
     # ── Price Action Summary ─────────────────────────────────────────────────
 
@@ -1040,6 +1337,21 @@ class StateEngine:
         self._1min_bars.clear()
         self._current_1min_bar = None
         self._1min_bar_start = None
+        # Clear HTF bars and in-progress HTF bar state
+        self._5min_bars.clear()
+        self._15min_bars.clear()
+        self._30min_bars.clear()
+        self._current_5min_bar = None
+        self._current_15min_bar = None
+        self._current_30min_bar = None
+        # Reset per-session high/low tracking
+        self._asian_high = 0.0
+        self._asian_low = float("inf")
+        self._london_high = 0.0
+        self._london_low = float("inf")
+        self._ny_high = 0.0
+        self._ny_low = float("inf")
+        self._last_session_phase = None
         self._opening_range_high = 0.0
         self._opening_range_low = float("inf")
         self._opening_range_set = False
@@ -1052,7 +1364,7 @@ class StateEngine:
         """Reset tick processor for RTH session open.
 
         Clears accumulated VWAP, delta, volume profile, 1-min bars,
-        opening range, and all technical indicators so that
+        opening range, HTF bars, and all technical indicators so that
         RTH session metrics start fresh and are not polluted by
         overnight/pre-market data.  Prior day, overnight levels,
         and pivot levels are preserved.
@@ -1063,6 +1375,21 @@ class StateEngine:
         self._1min_bars.clear()
         self._current_1min_bar = None
         self._1min_bar_start = None
+        # Clear HTF bars so they rebuild from fresh RTH data
+        self._5min_bars.clear()
+        self._15min_bars.clear()
+        self._30min_bars.clear()
+        self._current_5min_bar = None
+        self._current_15min_bar = None
+        self._current_30min_bar = None
+        # Reset per-session high/low for new day
+        self._asian_high = 0.0
+        self._asian_low = float("inf")
+        self._london_high = 0.0
+        self._london_low = float("inf")
+        self._ny_high = 0.0
+        self._ny_low = float("inf")
+        self._last_session_phase = None
         self._opening_range_high = 0.0
         self._opening_range_low = float("inf")
         self._opening_range_set = False
@@ -1076,7 +1403,7 @@ class StateEngine:
         """
         if not bars:
             return
-        self._1min_bars = bars[-120:]  # keep max 120 bars (2 hours)
+        self._1min_bars = bars[-1500:]  # keep max 1500 bars (25 hours) for HTF EMA warm-up
         # Set the current bar start to the last bar's timestamp so new bars
         # continue from where historical left off
         last_bar = self._1min_bars[-1]
@@ -1092,6 +1419,38 @@ class StateEngine:
             elif isinstance(ts, dt):
                 self._1min_bar_start = ts
         self._current_1min_bar = None  # force new bar on next tick
+
+        # Warm the confluence engine with historical bars so it detects
+        # order blocks, pivots, and sweep levels from existing data.
+        if self._confluence_engine is not None and len(self._1min_bars) >= 15:
+            atr = _compute_atr(self._1min_bars[-15:])
+            self._confluence_engine.update(self._1min_bars, atr)
+            logger.info(
+                "state_engine.confluence_warmed",
+                bars=len(self._1min_bars),
+                atr=round(atr, 2),
+            )
+
+        # Clear HTF state before replaying to prevent duplicates on double-call
+        self._5min_bars.clear()
+        self._15min_bars.clear()
+        self._30min_bars.clear()
+        self._current_5min_bar = None
+        self._current_15min_bar = None
+        self._current_30min_bar = None
+
+        # Build higher-TF bars and replay session H/L from warm data
+        for bar in self._1min_bars:
+            self._aggregate_to_higher_tf(bar)
+            # Replay session H/L using bar timestamp for phase classification
+            self._replay_session_hl(bar)
+        logger.info(
+            "state_engine.htf_bars_warmed",
+            bars_5m=len(self._5min_bars),
+            bars_15m=len(self._15min_bars),
+            bars_30m=len(self._30min_bars),
+        )
+
         logger.info(
             "state_engine.warm_1min_bars",
             bar_count=len(self._1min_bars),

@@ -411,16 +411,12 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
 
     trade_logger = TradeLogger(db_path=journal_path)
 
-    # Reset journal on startup during testing — MUST happen before
-    # circuit breakers load history, otherwise stale phantom PnL
-    # causes monthly loss shutdown.
-    # Remove this block once system is stable and in production.
-    try:
-        trade_logger.reset_all()
-        logger.info("main.journal_reset_for_testing",
-                    msg="SQLite journal cleared on startup (testing mode)")
-    except Exception:
-        logger.warning("main.journal_reset_failed", exc_info=True)
+    # Journal reset disabled for production — trade history must persist
+    # across restarts for circuit breakers and P&L tracking.
+    # Uncomment only for dev/testing:
+    # if config.dry_run:
+    #     trade_logger.reset_all()
+    #     logger.info("main.journal_reset_for_testing")
 
     postmortem_analyzer = PostmortemAnalyzer(llm_client=llm_client)
 
@@ -434,9 +430,9 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
     # ── Enhanced Execution ───────────────────────────────────────────────
 
     trail_manager = TrailManager(
-        trail_distance=10.0,
+        trail_distance=15.0,
         batch_points=trading.trail_min_move_points,
-        activation_profit_pts=8.0,
+        activation_profit_pts=10.0,
     )
 
     # ── Tick-Level Stop Monitor (QuantLynk only) ────────────────────────
@@ -452,14 +448,22 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         tick_stop_monitor = TickStopMonitor(
             flatten_fn=_tick_flatten,
             target_symbol=config.trading.symbol,
-            trail_distance=10.0,
-            trail_activation_points=10.0,    # was 8 — wait for solid profit before trailing
-            min_stop_distance=5.0,           # was 4 — never trail closer than 5pts
+            trail_distance=15.0,
+            trail_activation_points=12.0,    # wait for 12pt profit before trailing
+            min_stop_distance=7.0,           # never trail closer than 7pts
             tighten_at_profit=20.0,          # tight tier at 20pt profit
             tightened_distance=5.0,          # 5pt trail when in big profit
             mid_tighten_at_profit=12.0,      # mid tier at 12pt profit
             mid_tightened_distance=7.0,      # 7pt trail at moderate profit
         )
+        # Restore stop/trail state from disk if process crashed while in position
+        if tick_stop_monitor.load_from_disk():
+            logger.warning(
+                "main.tick_stop_restored_from_disk",
+                side=tick_stop_monitor._side,
+                stop=tick_stop_monitor._stop_price,
+                tp=tick_stop_monitor._take_profit_price,
+            )
 
     bull_bear_debate = BullBearDebate(llm_client=llm_client)
 
@@ -467,6 +471,53 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
 
     setup_detector = SetupDetector() if SetupDetector else None
     price_action_analyzer = PriceActionAnalyzer() if PriceActionAnalyzer else None
+
+    # ── Confluence Strategy Components ─────────────────────────────────────
+
+    from src.indicators.confluence import ConfluenceEngine
+    from src.indicators.order_flow import OrderFlowEngine
+    from src.execution.risk_manager import RiskManager
+
+    confluence_engine = ConfluenceEngine()
+    order_flow_engine = OrderFlowEngine()
+    risk_manager = RiskManager(daily_loss_limit=trading.max_daily_loss)
+    risk_manager.load_persisted_state()
+
+    # Wire order flow engine to state engine for enriched MarketState
+    state_engine.set_confluence_engine(confluence_engine)
+    state_engine.set_order_flow_engine(order_flow_engine)
+
+    # Wire depth feed (mbp-10) to order flow engine
+    if databento_client is not None:
+        async def _on_depth(data: dict) -> None:
+            """Forward depth updates to order flow engine."""
+            if "levels" in data:
+                order_flow_engine.update_depth(data["levels"])
+
+        async def _on_trade_for_flow(data: dict) -> None:
+            """Forward trades to order flow engine for VPIN/entropy/absorption."""
+            if data.get("symbol", "").startswith(trading.symbol[:3]):
+                order_flow_engine.update_trade(
+                    price=data["price"],
+                    size=data["size"],
+                    direction=data.get("direction", "unknown"),
+                    timestamp=data["timestamp"],
+                )
+
+        async def _on_quote_for_flow(data: dict) -> None:
+            """Forward BBO quotes to order flow engine as DOM fallback.
+
+            When mbp-10 isn't authorized, this provides a single-level
+            bid/ask imbalance from the BBO data that's always available.
+            """
+            bid_sz = data.get("bid_size", 0)
+            ask_sz = data.get("ask_size", 0)
+            if bid_sz > 0 or ask_sz > 0:
+                order_flow_engine.update_bbo(bid_sz, ask_sz)
+
+        databento_client.on_depth(_on_depth)
+        databento_client.on_trade(_on_trade_for_flow)
+        databento_client.on_quote(_on_quote_for_flow)
 
     # ── Circuit Breakers (multi-day/week/month) ────────────────────────
 
@@ -540,6 +591,9 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         "price_action_analyzer": price_action_analyzer,
         "circuit_breakers": circuit_breakers,
         "apex_guardrail": apex_guardrail,
+        "confluence_engine": confluence_engine,
+        "order_flow_engine": order_flow_engine,
+        "risk_manager": risk_manager,
     }
 
 
@@ -785,6 +839,10 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
         background_tasks.append(se_task)
         logger.info("main.state_engine_started")
 
+        # Reload persisted bars on startup so EMAs/OBs warm instantly
+        # instead of rebuilding from scratch over 30-90 minutes.
+        state_engine.reload_persisted_bars()
+
         # ── Step 5: Build orchestrator ───────────────────────────────────────
 
         # Build end-of-day summary function
@@ -840,6 +898,10 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
             price_action_analyzer=components.get("price_action_analyzer"),
             circuit_breakers=components.get("circuit_breakers"),
             apex_guardrail=components.get("apex_guardrail"),
+            # New confluence strategy components
+            confluence_engine=components.get("confluence_engine"),
+            order_flow_engine=components.get("order_flow_engine"),
+            risk_manager=components.get("risk_manager"),
             rth_reset_fn=lambda: (
                 state_engine.reset_for_rth(),
                 state_engine.reload_persisted_bars(),

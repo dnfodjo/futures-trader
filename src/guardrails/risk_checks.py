@@ -29,10 +29,10 @@ class RiskCheckGuardrail:
 
     def __init__(
         self,
-        min_stop_distance: float = 10.0,
+        min_stop_distance: float = 15.0,
         max_stop_distance: float = 25.0,
         max_stop_distance_eth: float = 12.0,
-        min_confidence: float = 0.55,
+        min_confidence: float = 0.65,
         min_entry_spacing_pts: float = 8.0,
         max_spread_pts: float = 3.0,
     ) -> None:

@@ -208,9 +208,9 @@ class QuantLynkOrderManager:
         self._orders_filled += 1  # assume filled (market order)
 
         # Calculate stop price (managed locally, not by QuantLynk)
-        # Enforce minimum stop distance of 10 points to prevent LLM from setting
-        # stops too tight (which inverts risk/reward)
-        min_stop_distance = 10.0
+        # Enforce minimum stop distance of 15 points — 10pt stops get hunted
+        # on every trade because MNQ's normal noise exceeds 10pts
+        min_stop_distance = 15.0
         raw_stop = action.stop_distance or self._default_stop_distance
         stop_distance = max(raw_stop, min_stop_distance)
         if raw_stop and raw_stop < min_stop_distance:

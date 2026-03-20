@@ -53,7 +53,7 @@ class SessionRuleGuardrail:
         daily_loss_limit: float = 400.0,
         blackout_minutes: int = 5,
         post_blackout_minutes: int = 10,
-        max_daily_trades: int = 20,
+        max_daily_trades: int = 6,
         max_contracts_eth: int = 2,
     ) -> None:
         self._max_consecutive_losers = max_consecutive_losers

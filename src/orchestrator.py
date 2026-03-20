@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time as dt_time, timedelta
 from typing import Any, Callable, Coroutine, Optional
 from zoneinfo import ZoneInfo
 
@@ -55,6 +55,9 @@ from src.notifications.alert_manager import AlertManager
 from src.guardrails.apex_rules import ApexRuleGuardrail
 from src.guardrails.circuit_breakers import CircuitBreakers
 from src.replay.data_recorder import DataRecorder
+from src.indicators.confluence import ConfluenceEngine
+from src.indicators.order_flow import OrderFlowEngine
+from src.execution.risk_manager import RiskManager
 
 # Optional enhanced modules (imported conditionally to avoid hard dependency)
 try:
@@ -137,6 +140,10 @@ class TradingOrchestrator:
         apex_guardrail: Optional[ApexRuleGuardrail] = None,
         rth_reset_fn: Optional[Callable[[], None]] = None,
         session_stats_fn: Optional[Callable[..., Coroutine]] = None,
+        # ── New confluence strategy components ──────────────────────────────
+        confluence_engine: Optional[ConfluenceEngine] = None,
+        order_flow_engine: Optional[OrderFlowEngine] = None,
+        risk_manager: Optional[RiskManager] = None,
     ) -> None:
         self._config = config
         self._bus = event_bus
@@ -172,6 +179,12 @@ class TradingOrchestrator:
         self._apex = apex_guardrail
         self._rth_reset_fn = rth_reset_fn
         self._session_stats_fn = session_stats_fn
+
+        # ── New confluence strategy components ────────────────────────────
+        self._confluence_engine = confluence_engine
+        self._order_flow_engine = order_flow_engine
+        self._risk_manager = risk_manager
+        self._use_confluence = (confluence_engine is not None and risk_manager is not None)
 
         # ── Internal state ──────────────────────────────────────────────────
 
@@ -213,6 +226,12 @@ class TradingOrchestrator:
         self._last_loss_side: Optional[Side] = None  # direction of consecutive losses
         self._max_consecutive_errors: int = 3  # kill switch threshold
         self._start_time: Optional[float] = None
+
+        # ── Trade quality guardrails (hard-coded, LLM cannot override) ──────
+        # These address the core problem: the LLM overtrades and chases.
+        self._last_entry_time: float = 0.0  # monotonic time of last ENTRY
+        self._trades_this_hour: int = 0  # entries in current clock hour
+        self._current_hour: int = -1  # track hour for reset
 
         # Tasks
         self._tasks: list[asyncio.Task] = []
@@ -433,6 +452,9 @@ class TradingOrchestrator:
         # metrics are not polluted by overnight/pre-market data
         if self._rth_reset_fn:
             self._rth_reset_fn()
+        # Reset risk manager daily state (trade counts, shutdown flag, cooldown)
+        if self._risk_manager:
+            self._risk_manager.reset_daily()
         # Reset flash crash detector to prevent false positives from
         # overnight/pre-market price gaps at session open
         if self._kill_switch:
@@ -484,6 +506,37 @@ class TradingOrchestrator:
                     self._session_ctrl.force_stop("Apex flatten deadline reached")
                     break
 
+            # Session boundary forced exits — flatten 5 min before each boundary
+            # Asian ends 2:00 AM ET → flatten at 1:55 AM
+            # Pre-RTH ends 9:30 AM ET → flatten at 9:25 AM
+            # (RTH close already handled by apex flatten at 4:54 PM)
+            position = self._position_tracker.position
+            if position is not None:
+                now_et = clock.now_et()
+                current_time = now_et.time()
+                # 1:55 AM ET — 5 min before Asian/London boundary
+                if dt_time(1, 55) <= current_time < dt_time(2, 0):
+                    logger.warning(
+                        "orchestrator.session_boundary_flatten",
+                        boundary="asian_end",
+                        time=current_time.isoformat(),
+                    )
+                    await self._hard_flatten(
+                        "Session boundary: flatten 5 min before Asian session end (2:00 AM ET)"
+                    )
+                    continue  # Skip decision cycle after session boundary flatten
+                # 9:25 AM ET — 5 min before RTH open
+                elif dt_time(9, 25) <= current_time < dt_time(9, 30):
+                    logger.warning(
+                        "orchestrator.session_boundary_flatten",
+                        boundary="pre_rth_end",
+                        time=current_time.isoformat(),
+                    )
+                    await self._hard_flatten(
+                        "Session boundary: flatten 5 min before RTH open (9:30 AM ET)"
+                    )
+                    continue  # Skip decision cycle after session boundary flatten
+
             # Time-based exit check — force reassessment of stale positions
             position = self._position_tracker.position
             if position is not None:
@@ -500,9 +553,12 @@ class TradingOrchestrator:
                         f"(force at {force_min}min)"
                     )
 
-            # Run one decision cycle
+            # Run one decision cycle (confluence-gated or legacy)
             try:
-                await self._decision_cycle()
+                if self._use_confluence:
+                    await self._confluence_decision_cycle()
+                else:
+                    await self._decision_cycle()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -524,7 +580,453 @@ class TradingOrchestrator:
                 # Normal — sleep period elapsed, continue loop
                 pass
 
-    # ── Decision Cycle ──────────────────────────────────────────────────────
+    # ── Confluence Decision Cycle (New Strategy) ─────────────────────────────
+
+    async def _confluence_decision_cycle(self) -> None:
+        """Confluence-gated decision cycle: state → risk gates → confluence → LLM → execute.
+
+        This replaces the old LLM-first approach. The LLM only gets called when
+        the mechanical confluence engine has already qualified the setup.
+        """
+        import json as _json
+
+        # 1. Get current market state
+        state = self._get_market_state()
+        if state is None:
+            return
+        self._last_state = state
+
+        # 2. Kill switch checks (same as legacy)
+        if self._kill_switch:
+            self._kill_switch.check_flash_crash(state.last_price, time.monotonic())
+            if self._kill_switch.is_triggered:
+                await self._hard_flatten("Kill switch: flash crash")
+                self._shutdown_event.set()
+                return
+            in_pos = self._position_tracker.position is not None
+            if hasattr(state, "timestamp") and state.timestamp:
+                self._kill_switch.check_connection(state.timestamp, in_pos)
+                if self._kill_switch.is_triggered:
+                    await self._hard_flatten("Kill switch: connection loss")
+                    self._shutdown_event.set()
+                    return
+            self._kill_switch.check_daily_loss(self._session_ctrl.daily_pnl)
+            if self._kill_switch.is_triggered:
+                await self._hard_flatten("Kill switch: daily loss limit")
+                self._shutdown_event.set()
+                return
+
+        # 3. Record state for replay
+        if self._data_recorder:
+            self._data_recorder.record_state(state)
+
+        # 4. Get current position and update unrealized P&L
+        position = self._position_tracker.position
+        if position is not None:
+            self._position_tracker.update_unrealized(state.last_price)
+
+        # Sync state.position with live position tracker
+        if (position is None) != (state.position is None):
+            state = state.model_copy(update={"position": position})
+            self._last_state = state
+
+        # 5. Detect if tick_stop_monitor already flattened us
+        if (
+            self._tick_stop_monitor
+            and self._tick_stop_monitor.is_triggered
+            and position is None
+        ):
+            reason = self._tick_stop_monitor.trigger_reason
+            logger.info("confluence.tick_stop_flatten_detected", reason=reason)
+            self._tick_stop_monitor.deactivate()
+
+        phase = state.session_phase
+        daily_pnl = self._session_ctrl.daily_pnl
+
+        # ── IN POSITION: check for mechanical exits + LLM assessment ──────
+        if position is not None:
+            # Mechanical exit checks from risk manager
+            if self._risk_manager:
+                should_exit, exit_reason = self._risk_manager.check_exit_needed(
+                    phase=phase,
+                    daily_pnl=daily_pnl,
+                    entropy=state.flow.entropy,
+                    position_pnl=position.unrealized_pnl,
+                    delta_against_minutes=0,  # TODO: track this
+                    absorption_against=(
+                        state.flow.absorption_detected
+                        and (
+                            (position.side == Side.LONG and state.flow.absorption_side == "ask")
+                            or (position.side == Side.SHORT and state.flow.absorption_side == "bid")
+                        )
+                    ),
+                )
+                if should_exit:
+                    logger.warning("confluence.mechanical_exit", reason=exit_reason)
+                    exit_action = LLMAction(
+                        action=ActionType.FLATTEN,
+                        reasoning=f"Mechanical exit: {exit_reason}",
+                        confidence=1.0,
+                        model_used="mechanical",
+                    )
+                    await self._execute_confluence_action(exit_action, state, position)
+                    return
+
+            # LLM exit assessment DISABLED — trail stop monitor manages all exits.
+            # The LLM was exiting after 18 seconds with 12pts unrealized profit
+            # because delta turned briefly positive.  Mechanical trail is more
+            # reliable: it locks in profit and only exits on actual price reversal.
+            # Re-enable once LLM exit logic is tuned to require sustained adverse
+            # conditions (e.g. 3+ min of adverse delta, not a single snapshot).
+            #
+            # The tick_stop_monitor handles: initial stop, trailing stop activation,
+            # trail tightening, and take-profit.  Risk manager handles session
+            # boundary exits and daily P&L gates.
+            logger.debug("confluence.in_position_cycle", side=position.side.value,
+                         unrealized_pnl=position.unrealized_pnl)
+
+            return  # No new entries while in position
+
+        # ── FLAT: check for new entry opportunities ───────────────────────
+
+        # Hard gate checks from risk manager
+        if not self._risk_manager or not self._confluence_engine:
+            return
+
+        # Score confluence for both directions
+        session_levels = {
+            "asian_high": state.levels.asian_high,
+            "asian_low": state.levels.asian_low,
+            "london_high": state.levels.london_high,
+            "london_low": state.levels.london_low,
+            "ny_high": state.levels.ny_high,
+            "ny_low": state.levels.ny_low,
+            "session_high": state.levels.session_high,
+            "session_low": state.levels.session_low,
+        }
+
+        # Periodic debug: log confluence engine internals every 20 cycles
+        if self._confluence_engine and self._cycle_count % 20 == 0:
+            logger.info(
+                "confluence.debug_state",
+                price=state.last_price,
+                atr=round(state.atr, 2),
+                bars_1m=len(state.recent_1min_bars) if state.recent_1min_bars else 0,
+                multi_tf_emas=state.multi_tf_emas,
+                bull_obs=len(self._confluence_engine._bull_obs) if hasattr(self._confluence_engine, '_bull_obs') else '?',
+                bear_obs=len(self._confluence_engine._bear_obs) if hasattr(self._confluence_engine, '_bear_obs') else '?',
+                swing_highs=len(self._confluence_engine._swing_highs) if hasattr(self._confluence_engine, '_swing_highs') else '?',
+                swing_lows=len(self._confluence_engine._swing_lows) if hasattr(self._confluence_engine, '_swing_lows') else '?',
+                sweeps=len(self._confluence_engine._sweep_levels) if hasattr(self._confluence_engine, '_sweep_levels') else '?',
+                bars_5m=len(state.multi_tf_bars.get("5m", [])) if hasattr(state, 'multi_tf_bars') and state.multi_tf_bars else '?',
+            )
+
+        # Try both directions — check which side has better confluence
+        best_score = None
+        best_side = None
+
+        for side_str in ("long", "short"):
+            score_result = self._confluence_engine.score(
+                side=side_str,
+                last_price=state.last_price,
+                bars_1m=state.recent_1min_bars if state.recent_1min_bars else [],
+                atr=state.atr,
+                multi_tf_emas=state.multi_tf_emas,
+                session_levels=session_levels,
+            )
+
+            if score_result.get("blocked"):
+                continue
+
+            score_val = score_result.get("score", 0)
+            if best_score is None or score_val > best_score:
+                best_score = score_val
+                best_side = side_str
+                best_result = score_result
+
+        if best_score is None or best_side is None:
+            return  # No confluence on either side
+
+        # Get session params
+        session_params = self._risk_manager.get_session_params(phase)
+
+        # Check if confluence meets session minimum
+        if best_score < session_params.min_confluence:
+            return  # Below threshold
+
+        # 30m trend agreement — computed here and passed to risk manager
+        # which decides whether to hard-block based on speed state.
+        ema_30m = state.multi_tf_emas.get("30m", {})
+        trend_30m_agrees = True
+        if ema_30m.get("ema_9", 0) > 0 and ema_30m.get("ema_50", 0) > 0:
+            if best_side == "long" and ema_30m["ema_9"] < ema_30m["ema_50"]:
+                trend_30m_agrees = False
+            elif best_side == "short" and ema_30m["ema_9"] > ema_30m["ema_50"]:
+                trend_30m_agrees = False
+
+        # Volume check — 5-bar rolling avg vs 20-bar SMA
+        # Uses rolling window instead of single bar to avoid one quiet minute
+        # blocking an otherwise valid entry.  Confluence already scores volume
+        # imbalance separately, so this gate just filters truly dead markets.
+        bars = state.recent_1min_bars or []
+        volume_sufficient = True
+        if len(bars) >= 20:
+            avg_vol = sum(b.get("volume", 0) for b in bars[-20:]) / 20
+            recent_vol = sum(b.get("volume", 0) for b in bars[-5:]) / 5
+            volume_sufficient = recent_vol >= avg_vol
+
+        # Run all hard gates
+        entry_allowed, block_reason = self._risk_manager.check_entry_allowed(
+            phase=phase,
+            daily_pnl=daily_pnl,
+            has_position=False,
+            confluence_score=best_score,
+            confidence=0.0,  # LLM hasn't been called yet
+            entropy=state.flow.entropy,
+            speed_state=best_result.get("speed_state", "NORMAL"),
+            trend_30m_agrees=trend_30m_agrees,
+            volume_sufficient=volume_sufficient,
+        )
+
+        if not entry_allowed:
+            if "daily_loss" not in block_reason.lower():  # Don't spam daily loss
+                logger.info("confluence.entry_blocked", reason=block_reason, score=best_score)
+            return
+
+        # ── Confluence passed + risk gates passed → execute entry ──
+
+        # Guard: don't enter with invalid price (can happen on first cycle
+        # after restart before any tick arrives)
+        if state.last_price <= 0:
+            logger.warning("confluence.entry_skipped_no_price", last_price=state.last_price)
+            return
+
+        # Map confluence score to a confidence proxy for logging/tracking
+        conf_proxy = min(0.50 + (best_score - session_params.min_confluence) * 0.10, 0.85)
+
+        entry_side = Side.LONG if best_side == "long" else Side.SHORT
+        sl_pts = self._risk_manager.get_sl_points(phase)
+
+        # factors values are dicts with {"score": int, "detail": str}
+        raw_factors = best_result.get("factors", {})
+        factors_str = ", ".join(
+            f"{k}={v['score'] if isinstance(v, dict) else v}"
+            for k, v in raw_factors.items()
+            if (v["score"] if isinstance(v, dict) else v) > 0
+        )
+
+        logger.info(
+            "confluence.entry_signal",
+            side=best_side,
+            confluence_score=best_score,
+            confidence_proxy=conf_proxy,
+            factors=factors_str,
+            phase=phase.value,
+        )
+
+        entry_action = LLMAction(
+            action=ActionType.ENTER,
+            side=entry_side,
+            quantity=2,  # Default 2 contracts
+            stop_distance=sl_pts,
+            reasoning=f"Confluence {best_score}/6 [{factors_str}] passed all risk gates. LLM bypassed (no DOM/OB data).",
+            confidence=conf_proxy,
+            setup_type=factors_str or "confluence",
+            model_used="bypass",
+            primary_timeframe="5m",
+            confluence_factors=list(best_result.get("factors", {}).keys()),
+            order_flow_assessment=f"entropy={state.flow.entropy:.2f}, vpin={state.flow.vpin:.2f}, delta_trend={state.flow.delta_trend}",
+            risk_flags=[],
+        )
+
+        await self._execute_confluence_action(entry_action, state, position)
+
+    async def _execute_confluence_action(
+        self,
+        action: LLMAction,
+        state: MarketState,
+        position: Optional[PositionState],
+    ) -> None:
+        """Execute a confluence-validated action via order manager."""
+        last_price = state.last_price
+
+        try:
+            exec_result = await self._order_manager.execute(
+                action=action,
+                position=position,
+                last_price=last_price,
+            )
+            self._actions_executed += 1
+
+            logger.info(
+                "confluence.action_executed",
+                action=action.action.value,
+                side=action.side.value if action.side else None,
+                confidence=action.confidence,
+            )
+
+            # Record entry time and session trade count (unconditional on ENTER)
+            if action.action == ActionType.ENTER:
+                self._last_entry_time = time.monotonic()
+                self._trades_this_hour += 1
+                if self._risk_manager:
+                    self._risk_manager.record_entry(clock.get_session_phase())
+
+            # Activate tick stop monitor on entry
+            if action.action == ActionType.ENTER and self._tick_stop_monitor:
+                new_position = self._position_tracker.position
+                if new_position:
+                    stop_price = 0.0
+                    if isinstance(self._order_manager, QuantLynkOrderManager):
+                        stop_price = self._order_manager.current_stop_price or 0.0
+
+                    fill_price = new_position.avg_entry
+                    current_atr = state.atr if state else 0.0
+                    current_phase = clock.get_session_phase()
+                    is_eth = clock.is_eth(current_phase)
+                    trading_cfg = self._config.trading
+
+                    # Compute hard take-profit from session params
+                    tp_pts = self._risk_manager.get_tp_points(current_phase) if self._risk_manager else 0.0
+                    if tp_pts > 0 and fill_price > 0:
+                        if new_position.side.value == "long":
+                            tp_price = round(fill_price + tp_pts, 2)
+                        else:
+                            tp_price = round(fill_price - tp_pts, 2)
+                    else:
+                        tp_price = 0.0
+
+                    self._tick_stop_monitor.activate(
+                        side=new_position.side.value,
+                        entry_price=fill_price,
+                        stop_price=stop_price,
+                        take_profit_price=tp_price,
+                        atr=current_atr,
+                        is_eth=is_eth,
+                        eth_trail_distance=trading_cfg.eth_trail_distance,
+                        eth_trail_activation=trading_cfg.eth_trail_activation_points,
+                        eth_mid_tighten_at_profit=trading_cfg.eth_mid_tighten_at_profit,
+                        eth_mid_tightened_distance=trading_cfg.eth_mid_tightened_distance,
+                        eth_tighten_at_profit=trading_cfg.eth_tighten_at_profit,
+                        eth_tightened_distance=trading_cfg.eth_tightened_distance,
+                    )
+                    logger.info(
+                        "confluence.tick_stop_activated",
+                        side=new_position.side.value,
+                        entry=fill_price,
+                        stop=stop_price,
+                        take_profit=tp_price,
+                        atr=current_atr,
+                    )
+
+            # Full post-exit bookkeeping on flatten (mirrors legacy path)
+            if action.action == ActionType.FLATTEN:
+                # Deactivate monitors
+                if self._tick_stop_monitor:
+                    self._tick_stop_monitor.deactivate()
+                if self._trail_manager and self._trail_manager.is_active:
+                    self._trail_manager.deactivate()
+
+                last_trade = self._position_tracker.last_trade
+                if last_trade:
+                    # Update session controller (daily P&L, win/loss, limits)
+                    try:
+                        self._session_ctrl.record_trade(last_trade)
+                    except Exception:
+                        logger.warning("confluence.session_record_failed", exc_info=True)
+
+                    # Log to trade journal
+                    if self._trade_logger:
+                        try:
+                            self._trade_logger.log_trade(last_trade)
+                            logger.info(
+                                "confluence.trade_logged",
+                                pnl=round(last_trade.pnl, 2),
+                                daily_pnl=round(self._session_ctrl.daily_pnl, 2),
+                            )
+                        except Exception:
+                            logger.warning("confluence.trade_log_failed", exc_info=True)
+
+                    # Sync session stats to state engine
+                    if self._session_stats_fn:
+                        try:
+                            await self._session_stats_fn(
+                                daily_pnl=self._session_ctrl.daily_pnl,
+                                daily_trades=self._session_ctrl.total_trades,
+                                daily_winners=self._session_ctrl.winners,
+                                daily_losers=self._session_ctrl.losers,
+                            )
+                        except Exception:
+                            logger.warning("confluence.session_stats_sync_failed", exc_info=True)
+
+                    # Send exit notification
+                    if self._alert_manager:
+                        try:
+                            await self._alert_manager.send_trade_exit(
+                                trade=last_trade,
+                                daily_pnl=self._session_ctrl.daily_pnl,
+                                winners=self._session_ctrl.winners,
+                                losers=self._session_ctrl.losers,
+                            )
+                        except Exception:
+                            logger.warning("confluence.exit_notification_failed", exc_info=True)
+
+                    # Thesis tracking (for intra-session LLM learning)
+                    if last_trade.pnl is not None:
+                        self._thesis_tracker.append({
+                            "exit_time": time.monotonic(),
+                            "exit_price": last_price,
+                            "side": last_trade.side.value,
+                            "entry_price": last_trade.entry_price,
+                            "pnl": last_trade.pnl,
+                            "reasoning": last_trade.reasoning_entry,
+                            "check_after_sec": 300,
+                        })
+
+                    # Cooldown state tracking
+                    if last_trade.pnl is not None:
+                        self._last_exit_time = time.monotonic()
+                        self._last_exit_side = last_trade.side
+                        if last_trade.pnl < 0:
+                            self._last_exit_was_loss = True
+                            if self._last_loss_side == last_trade.side:
+                                self._consecutive_same_dir_losses += 1
+                            else:
+                                self._consecutive_same_dir_losses = 1
+                                self._last_loss_side = last_trade.side
+                            # Trigger risk manager cooldown
+                            if self._risk_manager:
+                                self._risk_manager.record_loss(datetime.now(tz=UTC))
+                        else:
+                            self._last_exit_was_loss = False
+                            self._consecutive_same_dir_losses = 0
+                            self._last_loss_side = None
+
+                        # Persist direction-loss state to session controller
+                        self._session_ctrl._last_loss_side = (
+                            self._last_loss_side.value if self._last_loss_side else None
+                        )
+                        self._session_ctrl._consecutive_same_dir_losses = self._consecutive_same_dir_losses
+
+            # Publish action event
+            await self._bus.publish(Event(
+                type=EventType.ACTION_DECIDED,
+                data={
+                    "action": action.action.value,
+                    "side": action.side.value if action.side else None,
+                    "confidence": action.confidence,
+                    "reasoning": action.reasoning[:200],
+                },
+            ))
+
+        except Exception:
+            logger.exception(
+                "confluence.execution_error",
+                action=action.action.value,
+            )
+            self._errors += 1
+
+    # ── Legacy Decision Cycle ──────────────────────────────────────────────
 
     async def _decision_cycle(self) -> None:
         """Execute one full decision cycle: state → reason → guardrail → execute."""
@@ -676,6 +1178,9 @@ class TradingOrchestrator:
                 else:
                     self._consecutive_same_dir_losses = 1
                     self._last_loss_side = position.side
+                # Trigger risk manager cooldown on tick-stop loss
+                if self._risk_manager:
+                    self._risk_manager.record_loss(datetime.now(UTC))
             else:
                 self._last_exit_was_loss = False
                 self._consecutive_same_dir_losses = 0
@@ -797,20 +1302,22 @@ class TradingOrchestrator:
                     )
                 return
 
-        # 2a2. Post-stopout cooldown — 3 MINUTES after any losing exit.
-        # This is the #1 cause of blowing up: getting stopped out, then
-        # immediately re-entering because the LLM thinks "the setup is still good."
-        # NO. Wait 3 minutes for the dust to settle.
-        if position is None and self._last_exit_was_loss:
-            cooldown_sec = 180  # 3 minutes
+        # 2a2. UNIVERSAL cooldown — 5 MINUTES after ANY exit (win or loss).
+        # Winning traders wait between trades. The LLM re-enters 30 seconds
+        # after a win and gives the profit right back. After a LOSS, wait 8
+        # minutes (extra penalty to prevent revenge trading).
+        if position is None and self._last_exit_time > 0:
+            cooldown_sec = 480 if self._last_exit_was_loss else 300  # 8min loss, 5min win
             elapsed = time.monotonic() - self._last_exit_time
             if elapsed < cooldown_sec:
                 remaining = int(cooldown_sec - elapsed)
+                kind = "POST-LOSS" if self._last_exit_was_loss else "INTER-TRADE"
                 logger.info(
                     "orchestrator.cooldown_active",
                     remaining_sec=remaining,
+                    cooldown_type=kind,
                     last_exit_side=self._last_exit_side.value if self._last_exit_side else "none",
-                    msg=f"POST-STOPOUT COOLDOWN: {remaining}s remaining — no entries allowed",
+                    msg=f"{kind} COOLDOWN: {remaining}s remaining — no entries allowed",
                 )
                 return
 
@@ -1151,26 +1658,113 @@ class TradingOrchestrator:
                         )
                         return
 
-        # 4d3. VWAP extension guard — REMOVED
-        # The old 12pt limit blocked all trend day entries. On a 100pt trend day,
-        # price is >12pts from VWAP most of the time. This blocked the system from
-        # participating in the best trading days.
+        # 4d3. VWAP extension guard — block entries >15pts from VWAP.
+        # Entering far from VWAP = chasing. Price reverts to VWAP, and you
+        # get stopped. Exception: strong trend (all EMAs aligned + structure confirms)
+        # allows up to 20pts extension for trend continuation entries.
+        if action.action == ActionType.ENTER and action.side is not None:
+            vwap = state.levels.vwap
+            if vwap > 0:
+                vwap_dist = abs(state.last_price - vwap)
+                ema_align = state.emas.get("alignment", "mixed")
+                mkt_struct = getattr(state, "market_structure", {})
+                struct_pattern = mkt_struct.get("pattern", "mixed") if isinstance(mkt_struct, dict) else "mixed"
 
-        # 4d4. Momentum exhaustion guard — REMOVED
-        # 4 consecutive same-direction bars IS the trend, not exhaustion.
-        # This was blocking trend entries during the strongest moves.
+                # Strong trend = aligned EMAs + confirming structure
+                strong_trend_long = (
+                    ema_align in ("bullish", "bullish_partial")
+                    and struct_pattern == "HH_HL"
+                    and action.side == Side.LONG
+                )
+                strong_trend_short = (
+                    ema_align in ("bearish", "bearish_partial")
+                    and struct_pattern == "LH_LL"
+                    and action.side == Side.SHORT
+                )
+                max_vwap_dist = 20.0 if (strong_trend_long or strong_trend_short) else 15.0
 
-        # 4e. Anti-chase guardrail: Block entries AT the extreme (not near it)
-        # Reduced from 5pts to 3pts — the old 5pt zone was too wide and blocked
-        # valid breakout entries. Only block when literally AT the level.
+                if vwap_dist > max_vwap_dist:
+                    logger.warning(
+                        "orchestrator.vwap_extension_blocked",
+                        side=action.side.value,
+                        price=state.last_price,
+                        vwap=round(vwap, 2),
+                        distance=round(vwap_dist, 1),
+                        max_allowed=max_vwap_dist,
+                        msg=f"BLOCKED: {round(vwap_dist, 1)}pts from VWAP (max {max_vwap_dist}pts)",
+                    )
+                    return
+
+        # 4d4. Momentum chase guard — require pullback after fast move.
+        # If price moved 10+ points in the last 5 bars (5 minutes), require
+        # at least a 3pt pullback before entering. This prevents chasing
+        # momentum spikes where the move is already over.
+        if action.action == ActionType.ENTER and action.side is not None:
+            recent_bars = getattr(state, "recent_1min_bars", None) or getattr(state, "recent_bars", None) or []
+            if len(recent_bars) >= 5:
+                last_5 = recent_bars[-5:]
+                try:
+                    bar_highs = [b.get("high", b.get("h", 0)) if isinstance(b, dict) else getattr(b, "high", 0) for b in last_5]
+                    bar_lows = [b.get("low", b.get("l", 0)) if isinstance(b, dict) else getattr(b, "low", 0) for b in last_5]
+                    recent_range = max(bar_highs) - min(bar_lows)
+                    if recent_range > 10.0:
+                        price = state.last_price
+                        # For longs: price should have pulled back from the high
+                        if action.side == Side.LONG:
+                            pullback = max(bar_highs) - price
+                            if pullback < 3.0:
+                                logger.warning(
+                                    "orchestrator.momentum_chase_blocked",
+                                    side="long",
+                                    recent_range=round(recent_range, 1),
+                                    pullback=round(pullback, 1),
+                                    msg=f"BLOCKED: {round(recent_range, 1)}pt move in 5 bars, only {round(pullback, 1)}pt pullback (need 3+)",
+                                )
+                                return
+                        # For shorts: price should have bounced from the low
+                        elif action.side == Side.SHORT:
+                            bounce = price - min(bar_lows)
+                            if bounce < 3.0:
+                                logger.warning(
+                                    "orchestrator.momentum_chase_blocked",
+                                    side="short",
+                                    recent_range=round(recent_range, 1),
+                                    bounce=round(bounce, 1),
+                                    msg=f"BLOCKED: {round(recent_range, 1)}pt move in 5 bars, only {round(bounce, 1)}pt bounce (need 3+)",
+                                )
+                                return
+                except Exception:
+                    pass  # Don't block on bar parsing errors
+
+        # 4d5. Trades-per-hour limiter — max 2 entries per clock hour.
+        # Overtrading is the #1 cause of losses. Professional traders take
+        # 3-5 trades per DAY, not per hour.
+        if action.action == ActionType.ENTER:
+            import datetime as _dt
+            now_et = _dt.datetime.now(ZoneInfo("US/Eastern"))
+            current_hour = now_et.hour
+            if current_hour != self._current_hour:
+                self._current_hour = current_hour
+                self._trades_this_hour = 0
+            if self._trades_this_hour >= 2:
+                logger.warning(
+                    "orchestrator.hourly_trade_limit",
+                    trades_this_hour=self._trades_this_hour,
+                    hour=current_hour,
+                    msg=f"BLOCKED: Already {self._trades_this_hour} trades this hour (max 2/hour)",
+                )
+                return
+
+        # 4e. Anti-chase guardrail: Block entries near session extremes AND
+        # key levels in the wrong direction. Widened to 5pts from 3pts.
         if action.action == ActionType.ENTER and action.side is not None:
             price = state.last_price
             if action.side == Side.LONG:
-                # Don't enter long AT or ABOVE session high (within 3pts)
+                # Don't enter long near session high (within 5pts)
                 for level_name, level_val in [
                     ("session_high", state.levels.session_high),
                 ]:
-                    if level_val > 0 and abs(level_val - price) <= 3.0:
+                    if level_val > 0 and abs(level_val - price) <= 5.0:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="long",
@@ -1178,15 +1772,15 @@ class TradingOrchestrator:
                             level=level_name,
                             level_val=level_val,
                             distance=round(level_val - price, 2),
-                            msg=f"BLOCKED: Cannot enter long within 3pts of {level_name}",
+                            msg=f"BLOCKED: Cannot enter long within 5pts of {level_name}",
                         )
                         return
             elif action.side == Side.SHORT:
-                # Don't enter short AT or BELOW session low (within 3pts)
+                # Don't enter short near session low (within 5pts)
                 for level_name, level_val in [
                     ("session_low", state.levels.session_low),
                 ]:
-                    if level_val > 0 and abs(price - level_val) <= 3.0:
+                    if level_val > 0 and abs(price - level_val) <= 5.0:
                         logger.warning(
                             "orchestrator.anti_chase_blocked",
                             side="short",
@@ -1194,7 +1788,7 @@ class TradingOrchestrator:
                             level=level_name,
                             level_val=level_val,
                             distance=round(price - level_val, 2),
-                            msg=f"BLOCKED: Cannot enter short within 3pts of {level_name}",
+                            msg=f"BLOCKED: Cannot enter short within 5pts of {level_name}",
                         )
                         return
 
@@ -1370,6 +1964,13 @@ class TradingOrchestrator:
                 action=action.action.value,
                 result_keys=list(exec_result.keys()) if exec_result else [],
             )
+
+            # 7a-pre. Track entry timing for trade quality guardrails
+            if action.action == ActionType.ENTER:
+                self._last_entry_time = time.monotonic()
+                self._trades_this_hour += 1
+                if self._risk_manager:
+                    self._risk_manager.record_entry(clock.get_session_phase())
 
             # 7a. Activate/deactivate trail manager on position changes
             if self._trail_manager:
@@ -1966,14 +2567,16 @@ class TradingOrchestrator:
     # ── Kill Switch & Emergency ─────────────────────────────────────────────
 
     async def _on_kill_switch(self, event: Event) -> None:
-        """Handle kill switch activation."""
+        """Handle kill switch activation — flatten immediately."""
         reason = event.data.get("reason", "Unknown")
         logger.critical("orchestrator.kill_switch_triggered", reason=reason)
+        await self._hard_flatten(f"kill_switch: {reason}")
         self._shutdown_event.set()
 
     async def _on_daily_limit(self, event: Event) -> None:
-        """Handle daily limit hit event."""
+        """Handle daily limit hit event — flatten immediately."""
         logger.warning("orchestrator.daily_limit_hit")
+        await self._hard_flatten("daily_limit")
         self._session_ctrl.force_stop("Daily limit hit via event")
 
     async def _hard_flatten(self, reason: str) -> None:
@@ -1999,7 +2602,7 @@ class TradingOrchestrator:
             await self._order_manager.execute(
                 action=flatten_action,
                 position=position,
-                last_price=self._last_state.last_price if self._last_state else 0.0,
+                last_price=self._last_state.last_price if self._last_state else position.avg_entry,
             )
 
             # Record the trade to session controller and journal
@@ -2014,6 +2617,9 @@ class TradingOrchestrator:
                         self._trade_logger.log_trade(last_trade)
                     except Exception:
                         logger.warning("orchestrator.hard_flatten_trade_log_failed", exc_info=True)
+                # Trigger risk manager cooldown if the flatten was a loss
+                if last_trade.pnl < 0 and self._risk_manager:
+                    self._risk_manager.record_loss(datetime.now(UTC))
 
         except Exception:
             logger.exception("orchestrator.hard_flatten_failed")

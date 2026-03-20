@@ -33,12 +33,16 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
 import structlog
 
 logger = structlog.get_logger()
+
+_PERSIST_PATH = Path("data/tick_stop_state.json")
 
 FlattenFn = Callable[[float], Coroutine[Any, Any, Any]]
 
@@ -124,7 +128,7 @@ class TickStopMonitor:
         atr: float = 0.0,
         is_eth: bool = False,
         eth_trail_distance: float = 5.0,
-        eth_trail_activation: float = 2.0,
+        eth_trail_activation: float = 5.0,
         eth_mid_tighten_at_profit: float = 4.0,
         eth_mid_tightened_distance: float = 4.0,
         eth_tighten_at_profit: float = 8.0,
@@ -204,6 +208,7 @@ class TickStopMonitor:
             trail_activation=self._trail_activation,
             is_eth=is_eth,
         )
+        self.persist_to_disk()
 
     def deactivate(self) -> None:
         """Deactivate monitoring (position closed)."""
@@ -214,22 +219,55 @@ class TickStopMonitor:
             "tick_stop_monitor.deactivated",
             ticks_processed=self._ticks_processed,
         )
+        self.clear_persisted_state()
 
-    def update_stop(self, new_stop: float) -> None:
-        """Manually update the stop price (e.g., from LLM decision)."""
-        if self._active:
-            old = self._stop_price
-            self._stop_price = new_stop
-            logger.info(
-                "tick_stop_monitor.stop_updated",
-                old_stop=old,
-                new_stop=new_stop,
-            )
+    def update_stop(self, new_stop: float, *, force: bool = False) -> None:
+        """Manually update the stop price.
+
+        Protection rule: never degrade an existing trail.  For longs the
+        new stop must be *higher* (or equal) than the current stop; for
+        shorts it must be *lower* (or equal).  Pass ``force=True`` to
+        bypass this check (used only for the initial stop placement).
+        """
+        if not self._active:
+            return
+
+        old = self._stop_price
+
+        # Protection: never move the stop to a worse level
+        if not force and old > 0:
+            if self._side == "long" and new_stop < old:
+                logger.info(
+                    "tick_stop_monitor.stop_degradation_blocked",
+                    side="long",
+                    current_stop=old,
+                    requested_stop=new_stop,
+                    msg="Kept superior existing stop (long: new < current)",
+                )
+                return
+            if self._side == "short" and new_stop > old:
+                logger.info(
+                    "tick_stop_monitor.stop_degradation_blocked",
+                    side="short",
+                    current_stop=old,
+                    requested_stop=new_stop,
+                    msg="Kept superior existing stop (short: new > current)",
+                )
+                return
+
+        self._stop_price = new_stop
+        logger.info(
+            "tick_stop_monitor.stop_updated",
+            old_stop=old,
+            new_stop=new_stop,
+        )
+        self.persist_to_disk()
 
     def update_take_profit(self, new_tp: float) -> None:
         """Manually update the take-profit price."""
         if self._active:
             self._take_profit_price = new_tp
+            self.persist_to_disk()
 
     # ── Tick Processing ────────────────────────────────────────────────────
 
@@ -375,6 +413,7 @@ class TickStopMonitor:
                 # Stop only moves UP for longs (never moves backward)
                 if ideal_stop > self._stop_price:
                     self._stop_price = ideal_stop
+                    self.persist_to_disk()
 
         elif self._side == "short":
             # Track best (lowest) price
@@ -407,6 +446,7 @@ class TickStopMonitor:
                 # Stop only moves DOWN for shorts (never moves backward)
                 if ideal_stop < self._stop_price:
                     self._stop_price = ideal_stop
+                    self.persist_to_disk()
 
     # ── Flatten Execution ──────────────────────────────────────────────────
 
@@ -482,3 +522,82 @@ class TickStopMonitor:
             "ticks_processed": self._ticks_processed,
             "last_price": self._last_price,
         }
+
+    # ── State Persistence ─────────────────────────────────────────────────
+
+    def save_state(self) -> dict:
+        """Serialize current monitor state for persistence."""
+        return {
+            "active": self._active,
+            "side": self._side,
+            "entry_price": self._entry_price,
+            "stop_price": self._stop_price,
+            "take_profit_price": self._take_profit_price,
+            "best_price": self._best_price,
+            "trail_active": self._trail_active,
+            "trail_distance": self._trail_distance,
+            "trail_activation": self._trail_activation,
+            "mid_tighten_at_profit": self._mid_tighten_at_profit,
+            "mid_tightened_distance": self._mid_tightened_distance,
+            "tighten_at_profit": self._tighten_at_profit,
+            "tightened_distance": self._tightened_distance,
+        }
+
+    def load_state(self, data: dict) -> None:
+        """Restore monitor state from persisted data.
+
+        Call this on startup if broker reconciliation shows an open position.
+        """
+        if not data or not data.get("active"):
+            return
+        self._active = True
+        self._side = data.get("side")
+        self._entry_price = data.get("entry_price", 0.0)
+        self._stop_price = data.get("stop_price", 0.0)
+        self._take_profit_price = data.get("take_profit_price", 0.0)
+        self._best_price = data.get("best_price", 0.0)
+        self._trail_active = data.get("trail_active", False)
+        self._trail_distance = data.get("trail_distance", self._default_trail_distance)
+        self._trail_activation = data.get("trail_activation", self._trail_activation)
+        self._mid_tighten_at_profit = data.get("mid_tighten_at_profit", self._mid_tighten_at_profit)
+        self._mid_tightened_distance = data.get("mid_tightened_distance", self._mid_tightened_distance)
+        self._tighten_at_profit = data.get("tighten_at_profit", self._tighten_at_profit)
+        self._tightened_distance = data.get("tightened_distance", self._tightened_distance)
+        self._triggered = False
+        self._trigger_reason = ""
+        self._activation_time = time.monotonic()
+        logger.info(
+            "tick_stop_monitor.state_restored",
+            side=self._side,
+            entry=self._entry_price,
+            stop=self._stop_price,
+            best=self._best_price,
+            trail_active=self._trail_active,
+        )
+
+    def persist_to_disk(self) -> None:
+        """Write current state to disk for crash recovery."""
+        try:
+            _PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _PERSIST_PATH.write_text(json.dumps(self.save_state(), indent=2))
+        except Exception:
+            logger.warning("tick_stop_monitor.persist_failed", exc_info=True)
+
+    def load_from_disk(self) -> bool:
+        """Load state from disk if file exists. Returns True if loaded."""
+        try:
+            if _PERSIST_PATH.exists():
+                data = json.loads(_PERSIST_PATH.read_text())
+                self.load_state(data)
+                return self._active
+        except Exception:
+            logger.warning("tick_stop_monitor.load_failed", exc_info=True)
+        return False
+
+    def clear_persisted_state(self) -> None:
+        """Remove persisted state file (call after position is closed)."""
+        try:
+            if _PERSIST_PATH.exists():
+                _PERSIST_PATH.unlink()
+        except Exception:
+            pass

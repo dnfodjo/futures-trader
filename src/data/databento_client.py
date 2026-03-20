@@ -67,6 +67,7 @@ class DatabentoClient:
         # Callbacks
         self._trade_handlers: list[DataCallback] = []
         self._quote_handlers: list[DataCallback] = []
+        self._depth_handlers: list[DataCallback] = []
         self._error_handlers: list[DataCallback] = []
 
         # State
@@ -86,6 +87,9 @@ class DatabentoClient:
         self._quotes_received = 0
         self._errors = 0
 
+        # mbp-10 authorization flag — set to False if subscription is rejected
+        self._mbp10_authorized = True
+
     # ── Handler Registration ──────────────────────────────────────────────
 
     def on_trade(self, handler: DataCallback) -> None:
@@ -95,6 +99,10 @@ class DatabentoClient:
     def on_quote(self, handler: DataCallback) -> None:
         """Register a callback for L1 quote (BBO) events."""
         self._quote_handlers.append(handler)
+
+    def on_depth(self, handler: DataCallback) -> None:
+        """Register a callback for 10-level order book depth (mbp-10) events."""
+        self._depth_handlers.append(handler)
 
     def on_error(self, handler: DataCallback) -> None:
         """Register a callback for connection/data errors."""
@@ -201,6 +209,16 @@ class DatabentoClient:
                 symbols=[trading_symbol],
             )
 
+            # 10-level order book depth for order flow analysis (optional)
+            if self._depth_handlers and self._mbp10_authorized:
+                self._client.subscribe(
+                    dataset=self._config.dataset,
+                    schema="mbp-10",
+                    stype_in="raw_symbol",
+                    symbols=[trading_symbol],
+                )
+                logger.info("databento.mbp10_subscribed", symbol=trading_symbol)
+
             # Cross-market instruments (ES): use parent for auto-roll
             if cross_market_symbols:
                 self._client.subscribe(
@@ -264,9 +282,20 @@ class DatabentoClient:
                             self._errors += 1
                             logger.exception("databento.dispatch_error")
 
-                    # Stream ended normally (no more data)
+                    # Stream ended (server closed connection or end-of-day)
                     if not self._running:
                         return
+                    # If still supposed to be running, treat as disconnect and reconnect
+                    logger.warning("databento.stream_ended_unexpectedly")
+                    consecutive_failures += 1
+                    self._reconnect_count += 1
+                    delay = min(2 ** (consecutive_failures - 1), 30)
+                    await asyncio.sleep(delay)
+                    try:
+                        await self._reconnect()
+                    except Exception as re:
+                        logger.error("databento.reconnect_after_stream_end_failed", error=str(re))
+                    continue
 
                 except asyncio.CancelledError:
                     logger.info("databento.stream_cancelled")
@@ -275,6 +304,23 @@ class DatabentoClient:
                     self._errors += 1
                     consecutive_failures += 1
                     self._reconnect_count += 1
+
+                    # If mbp-10 is not authorized, disable it and reconnect without it
+                    err_str = str(e).lower()
+                    if ("not authorized" in err_str and "mbp" in err_str) or \
+                       ("subscription" in err_str and ("mbp-10" in err_str or "schema" in err_str)):
+                        self._mbp10_authorized = False
+                        logger.warning(
+                            "databento.mbp10_not_authorized",
+                            msg="Disabling mbp-10 depth subscription — account not authorized. "
+                                "Order flow will use trade data only (no DOM imbalance).",
+                        )
+                        consecutive_failures = 0  # Don't count as a real failure
+                        try:
+                            await self._reconnect()
+                        except Exception as re:
+                            logger.error("databento.reconnect_failed", error=str(re))
+                        continue
 
                     if consecutive_failures > max_reconnects:
                         logger.error(
@@ -359,6 +405,11 @@ class DatabentoClient:
                 self._quotes_received += 1
                 await self._dispatch_to_handlers(self._quote_handlers, quote_data)
 
+        elif record_type in ("MBP10Msg", "Mbp10Msg"):
+            depth_data = self._parse_depth(record)
+            if depth_data:
+                await self._dispatch_to_handlers(self._depth_handlers, depth_data)
+
         # Other record types (SystemMsg, ErrorMsg, etc.) are logged but not dispatched
 
     def _parse_trade(self, record: Any) -> dict[str, Any] | None:
@@ -434,6 +485,58 @@ class DatabentoClient:
             }
         except Exception:
             logger.exception("databento.parse_quote_error")
+            return None
+
+    def _parse_depth(self, record: Any) -> dict[str, Any] | None:
+        """Parse a Databento MBP10Msg into our internal depth format.
+
+        Extracts 10 levels of bid/ask price and size for DOM analysis.
+        """
+        try:
+            levels_data = []
+            raw_levels = record.levels if hasattr(record, "levels") else None
+
+            if raw_levels and len(raw_levels) >= 10:
+                for i in range(10):
+                    lvl = raw_levels[i]
+                    bid_px = lvl.bid_px / 1e9 if lvl.bid_px > 1e6 else lvl.bid_px
+                    ask_px = lvl.ask_px / 1e9 if lvl.ask_px > 1e6 else lvl.ask_px
+                    levels_data.append({
+                        "bid_price": bid_px,
+                        "bid_size": lvl.bid_sz,
+                        "ask_price": ask_px,
+                        "ask_size": lvl.ask_sz,
+                    })
+            else:
+                # Fallback: try flat field names (bid_px_00..bid_px_09)
+                for i in range(10):
+                    bp = getattr(record, f"bid_px_{i:02d}", 0) or 0
+                    bs = getattr(record, f"bid_sz_{i:02d}", 0) or 0
+                    ap = getattr(record, f"ask_px_{i:02d}", 0) or 0
+                    az = getattr(record, f"ask_sz_{i:02d}", 0) or 0
+                    if bp > 1e6:
+                        bp /= 1e9
+                    if ap > 1e6:
+                        ap /= 1e9
+                    levels_data.append({
+                        "bid_price": bp,
+                        "bid_size": bs,
+                        "ask_price": ap,
+                        "ask_size": az,
+                    })
+
+            if not levels_data:
+                return None
+
+            ts = self._parse_timestamp(record)
+
+            return {
+                "type": "depth",
+                "timestamp": ts,
+                "levels": levels_data,
+            }
+        except Exception:
+            logger.exception("databento.parse_depth_error")
             return None
 
     def _resolve_symbol(self, record: Any, price: float = 0.0) -> str:
