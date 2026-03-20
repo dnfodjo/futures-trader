@@ -186,6 +186,9 @@ class TradingOrchestrator:
         self._risk_manager = risk_manager
         self._use_confluence = (confluence_engine is not None and risk_manager is not None)
 
+        # ── Pre-market context (set by set_pre_market_context) ────────────
+        self._pre_market_context = None
+
         # ── Internal state ──────────────────────────────────────────────────
 
         self._state = OrchestratorState.INITIALIZING
@@ -235,6 +238,27 @@ class TradingOrchestrator:
 
         # Tasks
         self._tasks: list[asyncio.Task] = []
+
+    # ── Public API ─────────────────────────────────────────────────────────
+
+    def set_pre_market_context(self, context) -> None:
+        """Set pre-market context for today's trading session."""
+        # Filter out invalid no-trade windows that cross midnight
+        # (string comparison "start <= now <= end" fails when end < start)
+        if hasattr(context, 'no_trade_windows') and context.no_trade_windows:
+            valid_windows = []
+            for start, end in context.no_trade_windows:
+                if end < start:
+                    logger.warning("orchestrator.invalid_no_trade_window",
+                                 window=f"{start}-{end}",
+                                 msg="Window crosses midnight — removed (not supported)")
+                else:
+                    valid_windows.append((start, end))
+            context.no_trade_windows = valid_windows
+        self._pre_market_context = context
+        logger.info("orchestrator.pre_market_context_set",
+                    risk_level=getattr(context, 'risk_level', 'unknown'),
+                    events=getattr(context, 'events', []))
 
     # ── Public Lifecycle ────────────────────────────────────────────────────
 
@@ -721,6 +745,11 @@ class TradingOrchestrator:
                 bars_5m=len(state.multi_tf_bars.get("5m", [])) if hasattr(state, 'multi_tf_bars') and state.multi_tf_bars else '?',
             )
 
+        # Get bars_5m from state for structure bounce confirmation
+        bars_5m = []
+        if hasattr(state, 'multi_tf_bars') and state.multi_tf_bars:
+            bars_5m = state.multi_tf_bars.get("5m", [])
+
         # Try both directions — check which side has better confluence
         best_score = None
         best_side = None
@@ -733,6 +762,7 @@ class TradingOrchestrator:
                 atr=state.atr,
                 multi_tf_emas=state.multi_tf_emas,
                 session_levels=session_levels,
+                bars_5m=bars_5m,
             )
 
             if score_result.get("blocked"):
@@ -747,11 +777,31 @@ class TradingOrchestrator:
         if best_score is None or best_side is None:
             return  # No confluence on either side
 
+        # Check no_trade_windows from pre-market context
+        # NOTE: String comparison assumes windows do NOT cross midnight (e.g., "23:45" to "00:15").
+        # All MNQ trading windows are intraday ET, so this is safe.
+        if self._pre_market_context and getattr(self._pre_market_context, 'no_trade_windows', None):
+            from zoneinfo import ZoneInfo
+            from datetime import datetime as _dt
+            now_et = _dt.now(ZoneInfo("America/New_York")).strftime("%H:%M")
+            for window_start, window_end in self._pre_market_context.no_trade_windows:
+                if window_start <= now_et <= window_end:
+                    logger.warning("orchestrator.no_trade_window_active",
+                                 window=f"{window_start}-{window_end}",
+                                 msg=f"Entry blocked by no-trade window {window_start}-{window_end}")
+                    return
+
         # Get session params
         session_params = self._risk_manager.get_session_params(phase)
 
+        # Apply pre-market min_confluence_override (raises floor if set)
+        min_confluence = session_params.min_confluence
+        if (self._pre_market_context
+            and getattr(self._pre_market_context, 'min_confluence_override', None) is not None):
+            min_confluence = max(min_confluence, self._pre_market_context.min_confluence_override)
+
         # Check if confluence meets session minimum
-        if best_score < session_params.min_confluence:
+        if best_score < min_confluence:
             return  # Below threshold
 
         # 30m trend agreement — computed here and passed to risk manager
@@ -807,6 +857,11 @@ class TradingOrchestrator:
         entry_side = Side.LONG if best_side == "long" else Side.SHORT
         sl_pts = self._risk_manager.get_sl_points(phase)
 
+        # Apply pre-market context adjustments: widen stops on volatile days
+        if self._pre_market_context and getattr(self._pre_market_context, "widen_stops", False):
+            sl_pts = sl_pts * 1.25  # 25% wider stops (e.g., 40pt → 50pt)
+            logger.info("confluence.widen_stops_applied", original_sl=sl_pts / 1.25, widened_sl=sl_pts)
+
         # factors values are dicts with {"score": int, "detail": str}
         raw_factors = best_result.get("factors", {})
         factors_str = ", ".join(
@@ -827,7 +882,7 @@ class TradingOrchestrator:
         entry_action = LLMAction(
             action=ActionType.ENTER,
             side=entry_side,
-            quantity=2,  # Default 2 contracts
+            quantity=(1 if self._pre_market_context and getattr(self._pre_market_context, "reduce_size", False) else 2),
             stop_distance=sl_pts,
             reasoning=f"Confluence {best_score}/6 [{factors_str}] passed all risk gates. LLM bypassed (no DOM/OB data).",
             confidence=conf_proxy,

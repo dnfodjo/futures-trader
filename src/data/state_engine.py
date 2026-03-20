@@ -316,9 +316,11 @@ class StateEngine:
         self._5min_bars: list[dict] = []
         self._15min_bars: list[dict] = []
         self._30min_bars: list[dict] = []
+        self._1h_bars: list[dict] = []
         self._current_5min_bar: Optional[dict] = None
         self._current_15min_bar: Optional[dict] = None
         self._current_30min_bar: Optional[dict] = None
+        self._current_1h_bar: Optional[dict] = None
 
         # Per-session high/low tracking for liquidity sweep targets
         self._asian_high: float = 0.0
@@ -335,6 +337,7 @@ class StateEngine:
 
         # Callbacks for higher-TF bar completions
         self._on_5min_bar_callbacks: list = []
+        self._on_1h_bar_callbacks: list = []
 
         # Opening range tracking (9:30-9:45 ET)
         self._opening_range_high: float = 0.0
@@ -482,6 +485,10 @@ class StateEngine:
         """Register a callback for 5-minute bar completions."""
         self._on_5min_bar_callbacks.append(callback)
 
+    def register_1h_bar_callback(self, cb) -> None:
+        """Register a callback for 1-hour bar completions."""
+        self._on_1h_bar_callbacks.append(cb)
+
     # ── Multi-TF Bar Aggregation ──────────────────────────────────────────────
 
     def _finalize_1min_bar(self, bar: dict) -> None:
@@ -518,6 +525,8 @@ class StateEngine:
         self._update_htf_bar(bar_1m, "_current_15min_bar", self._15min_bars, 15, bar_minute)
         # 30-minute bars — close on :29, :59
         self._update_htf_bar(bar_1m, "_current_30min_bar", self._30min_bars, 30, bar_minute)
+        # 1h bars — close on :59
+        self._update_htf_bar(bar_1m, "_current_1h_bar", self._1h_bars, 60, bar_minute)
 
     @staticmethod
     def _extract_minute(bar: dict) -> int:
@@ -589,6 +598,14 @@ class StateEngine:
                             cb(finalized)
                         except Exception:
                             logger.exception("state_engine.5min_bar_callback_error")
+
+                # Fire 1h callback for structure level updates
+                if period == 60:
+                    for cb in self._on_1h_bar_callbacks:
+                        try:
+                            cb(finalized)
+                        except Exception:
+                            logger.exception("state_engine.1h_bar_callback_error")
 
                 # Reset for next HTF bar
                 setattr(self, current_attr, None)
@@ -915,6 +932,7 @@ class StateEngine:
                     "5m": self._5min_bars[-30:],
                     "15m": self._15min_bars[-20:],
                     "30m": self._30min_bars[-10:],
+                    "1h": self._1h_bars[-10:],
                 },
                 multi_tf_emas=self._compute_multi_tf_emas(),
                 confluence_score=0,  # computed by orchestrator via ConfluenceEngine
@@ -1282,6 +1300,16 @@ class StateEngine:
     # ── Accessors ────────────────────────────────────────────────────────────
 
     @property
+    def bars_1h(self) -> list[dict]:
+        """Finalized 1-hour bars."""
+        return self._1h_bars
+
+    @property
+    def bars_5m(self) -> list[dict]:
+        """Finalized 5-minute bars."""
+        return self._5min_bars
+
+    @property
     def last_state(self) -> Optional[MarketState]:
         """Most recently computed MarketState."""
         return self._last_state
@@ -1341,9 +1369,11 @@ class StateEngine:
         self._5min_bars.clear()
         self._15min_bars.clear()
         self._30min_bars.clear()
+        self._1h_bars.clear()
         self._current_5min_bar = None
         self._current_15min_bar = None
         self._current_30min_bar = None
+        self._current_1h_bar = None
         # Reset per-session high/low tracking
         self._asian_high = 0.0
         self._asian_low = float("inf")
@@ -1379,9 +1409,11 @@ class StateEngine:
         self._5min_bars.clear()
         self._15min_bars.clear()
         self._30min_bars.clear()
+        self._1h_bars.clear()
         self._current_5min_bar = None
         self._current_15min_bar = None
         self._current_30min_bar = None
+        self._current_1h_bar = None
         # Reset per-session high/low for new day
         self._asian_high = 0.0
         self._asian_low = float("inf")
@@ -1435,9 +1467,11 @@ class StateEngine:
         self._5min_bars.clear()
         self._15min_bars.clear()
         self._30min_bars.clear()
+        self._1h_bars.clear()
         self._current_5min_bar = None
         self._current_15min_bar = None
         self._current_30min_bar = None
+        self._current_1h_bar = None
 
         # Build higher-TF bars and replay session H/L from warm data
         for bar in self._1min_bars:
@@ -1449,6 +1483,7 @@ class StateEngine:
             bars_5m=len(self._5min_bars),
             bars_15m=len(self._15min_bars),
             bars_30m=len(self._30min_bars),
+            bars_1h=len(self._1h_bars),
         )
 
         logger.info(

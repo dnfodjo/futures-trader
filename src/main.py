@@ -472,13 +472,19 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
     setup_detector = SetupDetector() if SetupDetector else None
     price_action_analyzer = PriceActionAnalyzer() if PriceActionAnalyzer else None
 
+    # ── HTF Structure Levels ────────────────────────────────────────────────
+
+    from src.indicators.structure_levels import StructureLevelManager
+
+    structure_manager = StructureLevelManager()
+
     # ── Confluence Strategy Components ─────────────────────────────────────
 
     from src.indicators.confluence import ConfluenceEngine
     from src.indicators.order_flow import OrderFlowEngine
     from src.execution.risk_manager import RiskManager
 
-    confluence_engine = ConfluenceEngine()
+    confluence_engine = ConfluenceEngine(structure_manager=structure_manager)
     order_flow_engine = OrderFlowEngine()
     risk_manager = RiskManager(daily_loss_limit=trading.max_daily_loss)
     risk_manager.load_persisted_state()
@@ -594,6 +600,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
         "confluence_engine": confluence_engine,
         "order_flow_engine": order_flow_engine,
         "risk_manager": risk_manager,
+        "structure_manager": structure_manager,
     }
 
 
@@ -843,6 +850,57 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
         # instead of rebuilding from scratch over 30-90 minutes.
         state_engine.reload_persisted_bars()
 
+        # ── Step 4c: Load HTF structure levels from Databento historical ──
+        structure_manager = components.get("structure_manager")
+        if not dry_run and components["databento_client"] and config.databento.api_key and structure_manager:
+            try:
+                from src.data.databento_client import DatabentoClient as _DBC
+
+                htf_bars_1h = await _DBC.fetch_htf_bars(
+                    api_key=config.databento.api_key, timeframe="1h", lookback_days=60,
+                )
+                htf_bars_4h = await _DBC.fetch_htf_bars(
+                    api_key=config.databento.api_key, timeframe="4h", lookback_days=180,
+                )
+                htf_bars_daily = await _DBC.fetch_htf_bars(
+                    api_key=config.databento.api_key, timeframe="1d", lookback_days=365,
+                )
+                htf_bars_weekly = await _DBC.fetch_htf_bars(
+                    api_key=config.databento.api_key, timeframe="1w", lookback_days=730,
+                )
+
+                structure_manager.compute_levels(htf_bars_1h, "1h")
+                structure_manager.compute_levels(htf_bars_4h, "4h")
+                structure_manager.compute_levels(htf_bars_daily, "D")
+                structure_manager.compute_levels(htf_bars_weekly, "W")
+
+                all_levels = structure_manager.levels
+                logger.info(
+                    "main.htf_structure_levels_loaded",
+                    levels_1h=len([l for l in all_levels if l.timeframe == "1h"]),
+                    levels_4h=len([l for l in all_levels if l.timeframe == "4h"]),
+                    levels_D=len([l for l in all_levels if l.timeframe == "D"]),
+                    levels_W=len([l for l in all_levels if l.timeframe == "W"]),
+                )
+            except Exception:
+                logger.warning("main.htf_fetch_failed", exc_info=True,
+                             msg="Running without HTF structure levels")
+
+        # Wire 1h bar updates to structure level manager
+        if structure_manager and hasattr(state_engine, 'register_1h_bar_callback'):
+            def _on_1h_bar(bar: dict) -> None:
+                structure_manager.update_on_bar_close(bar, "1h")
+            state_engine.register_1h_bar_callback(_on_1h_bar)
+
+        # ── Step 4d: Pre-Market Context ──────────────────────────────────────
+        from src.intelligence.pre_market_context import PreMarketContextGenerator
+
+        pre_market_ctx_gen = PreMarketContextGenerator(
+            llm_client=components["llm_client"],
+            calendar_path="config/economic_events.json",
+        )
+        pre_market_context = await pre_market_ctx_gen.generate()
+
         # ── Step 5: Build orchestrator ───────────────────────────────────────
 
         # Build end-of-day summary function
@@ -908,6 +966,9 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
             ),
             session_stats_fn=state_engine.update_session_stats,
         )
+
+        # Set pre-market context on orchestrator
+        orchestrator.set_pre_market_context(pre_market_context)
 
         # Install signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()

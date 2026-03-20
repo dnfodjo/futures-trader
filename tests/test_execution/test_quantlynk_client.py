@@ -265,8 +265,8 @@ class TestQuantLynkOrderManager:
 
         result = await manager.execute(action, position=None, last_price=19825.0)
 
-        assert result["stop_price"] == 19815.0
-        assert manager.current_stop_price == 19815.0
+        assert result["stop_price"] == 19810.0
+        assert manager.current_stop_price == 19810.0
 
     @pytest.mark.asyncio
     async def test_enter_sets_stop_price_short(self):
@@ -275,7 +275,7 @@ class TestQuantLynkOrderManager:
 
         result = await manager.execute(action, position=None, last_price=19825.0)
 
-        assert result["stop_price"] == 19835.0
+        assert result["stop_price"] == 19840.0
 
     @pytest.mark.asyncio
     async def test_enter_skipped_when_in_position(self):

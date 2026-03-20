@@ -139,6 +139,8 @@ def mock_session_ctrl():
     sc.stats = {"daily_pnl": 0.0}
     sc.start_session = MagicMock()
     sc.force_stop = MagicMock()
+    sc._last_loss_side = None
+    sc._consecutive_same_dir_losses = 0
     return sc
 
 

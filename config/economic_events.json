@@ -1,0 +1,22 @@
+{
+  "_description": "Weekly economic calendar for MNQ trading system. Update weekly (Sunday evening).",
+  "_format": "YYYY-MM-DD: [{time: 'HH:MM ET', event: 'name', impact: 'high|medium|low'}]",
+  "2026-03-23": [
+    {"time": "10:00", "event": "Existing Home Sales", "impact": "medium"}
+  ],
+  "2026-03-25": [
+    {"time": "10:00", "event": "New Home Sales", "impact": "medium"},
+    {"time": "10:00", "event": "Consumer Confidence", "impact": "high"}
+  ],
+  "2026-03-26": [
+    {"time": "08:30", "event": "Durable Goods Orders", "impact": "high"}
+  ],
+  "2026-03-27": [
+    {"time": "08:30", "event": "GDP (Final)", "impact": "high"},
+    {"time": "08:30", "event": "Jobless Claims", "impact": "medium"}
+  ],
+  "2026-03-28": [
+    {"time": "08:30", "event": "PCE Price Index", "impact": "high"},
+    {"time": "10:00", "event": "Michigan Consumer Sentiment (Final)", "impact": "medium"}
+  ]
+}

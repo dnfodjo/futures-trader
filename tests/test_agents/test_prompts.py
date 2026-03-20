@@ -12,8 +12,8 @@ from src.agents.prompts.system_prompt import (
 class TestSystemPrompt:
     def test_system_prompt_exists(self) -> None:
         assert len(SYSTEM_PROMPT) > 100
-        assert "autonomous" in SYSTEM_PROMPT.lower()
-        assert "DO_NOTHING" in SYSTEM_PROMPT
+        assert "VALIDATION" in SYSTEM_PROMPT
+        assert "confidence" in SYSTEM_PROMPT.lower()
 
     def test_trading_decision_tool_schema(self) -> None:
         assert TRADING_DECISION_TOOL["name"] == "trading_decision"
@@ -22,18 +22,19 @@ class TestSystemPrompt:
         assert "action" in props
         assert "reasoning" in props
         assert "confidence" in props
-        assert "side" in props
-        assert "quantity" in props
-        assert "stop_distance" in props
-        assert "new_stop_price" in props
+        assert "primary_timeframe" in props
+        assert "confluence_factors" in props
+        assert "order_flow_assessment" in props
+        assert "risk_flags" in props
 
     def test_action_enum_values(self) -> None:
         actions = TRADING_DECISION_TOOL["input_schema"]["properties"]["action"]["enum"]
-        assert "ENTER" in actions
-        assert "DO_NOTHING" in actions
-        assert "FLATTEN" in actions
+        assert "LONG" in actions
+        assert "SHORT" in actions
+        assert "EXIT" in actions
+        assert "FLAT" in actions
         assert "STOP_TRADING" in actions
-        assert len(actions) == 7
+        assert len(actions) == 5
 
 
 class TestBuildSystemBlocks:

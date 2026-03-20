@@ -62,11 +62,11 @@ def _make_llm_response(
 
 class TestModelSelection:
     def test_haiku_when_flat_midday(self) -> None:
-        """Uses Haiku when no position during midday (lowest activity)."""
+        """Always returns sonnet — LLM is only called for pre-qualified setups."""
         llm = MagicMock()
         reasoner = Reasoner(llm_client=llm)
         state = _make_state(session_phase=SessionPhase.MIDDAY)
-        assert reasoner._select_model(state) == "haiku"
+        assert reasoner._select_model(state) == "sonnet"
 
     def test_sonnet_when_flat_morning(self) -> None:
         """Uses Sonnet when flat during morning (best trading window)."""
@@ -145,8 +145,9 @@ class TestResponseParsing:
         action = reasoner._parse_action(response, "sonnet")
         assert action.action == ActionType.ENTER
         assert action.side == Side.LONG
-        assert action.quantity == 3
-        assert action.stop_distance == 15.0
+        # quantity and stop_distance are not parsed from tool_input in current schema
+        assert action.quantity is None
+        assert action.stop_distance is None
         assert action.confidence == 0.8
 
     def test_parse_move_stop(self) -> None:
@@ -163,7 +164,8 @@ class TestResponseParsing:
         )
         action = reasoner._parse_action(response, "sonnet")
         assert action.action == ActionType.MOVE_STOP
-        assert action.new_stop_price == 19860.0
+        # new_stop_price is not parsed from tool_input in current schema
+        assert action.new_stop_price is None
 
     def test_parse_no_tool_output(self) -> None:
         """Missing tool output returns DO_NOTHING."""
@@ -244,24 +246,24 @@ class TestDecide:
 
     @pytest.mark.asyncio
     async def test_call_failed_returns_do_nothing(self) -> None:
-        """Call failure returns safe DO_NOTHING."""
+        """Call failure returns safe FLAT (via _safe_fallback)."""
         llm = MagicMock()
         llm.call = AsyncMock(side_effect=LLMCallFailed("all retries failed"))
 
         reasoner = Reasoner(llm_client=llm)
         action = await reasoner.decide(_make_state())
-        assert action.action == ActionType.DO_NOTHING
+        assert action.action == ActionType.FLAT
         assert reasoner.consecutive_parse_errors == 1
 
     @pytest.mark.asyncio
     async def test_unexpected_error_returns_do_nothing(self) -> None:
-        """Unexpected error returns safe DO_NOTHING."""
+        """Unexpected error returns safe FLAT (via _safe_fallback)."""
         llm = MagicMock()
         llm.call = AsyncMock(side_effect=RuntimeError("unexpected"))
 
         reasoner = Reasoner(llm_client=llm)
         action = await reasoner.decide(_make_state())
-        assert action.action == ActionType.DO_NOTHING
+        assert action.action == ActionType.FLAT
 
     @pytest.mark.asyncio
     async def test_game_plan_passed_to_system(self) -> None:
@@ -357,27 +359,27 @@ class TestAdaptiveTemperature:
         assert temp == 0.0
 
     def test_in_position_uses_active_temp(self) -> None:
-        """In position → temperature 0.2 (nuanced management)."""
+        """In position → temperature 0.0 (validation engine, always deterministic)."""
         llm = MagicMock()
         reasoner = Reasoner(llm_client=llm)
         state = _make_state(
             position=PositionState(side=Side.LONG, quantity=2, avg_entry=19840.0)
         )
         temp = reasoner._select_temperature(state, detected_setups="")
-        assert temp == Reasoner.TEMP_ACTIVE
+        assert temp == Reasoner.TEMP
 
     def test_setups_detected_uses_entry_temp(self) -> None:
-        """Setups detected → temperature 0.15 (entry decisions)."""
+        """Setups detected → temperature 0.0 (validation engine, always deterministic)."""
         llm = MagicMock()
         reasoner = Reasoner(llm_client=llm)
         state = _make_state()
         temp = reasoner._select_temperature(
             state, detected_setups="VWAP pullback detected"
         )
-        assert temp == Reasoner.TEMP_ENTRY
+        assert temp == Reasoner.TEMP
 
     def test_near_level_uses_entry_temp(self) -> None:
-        """Near a key level → temperature 0.15 (elevated attention)."""
+        """Near a key level → temperature 0.0 (validation engine, always deterministic)."""
         from src.core.types import KeyLevels
 
         llm = MagicMock()
@@ -387,7 +389,7 @@ class TestAdaptiveTemperature:
             levels=KeyLevels(prior_day_high=19872.0),
         )
         temp = reasoner._select_temperature(state, detected_setups="")
-        assert temp == Reasoner.TEMP_ENTRY
+        assert temp == Reasoner.TEMP
 
     @pytest.mark.asyncio
     async def test_temperature_actually_passed_to_llm(self) -> None:

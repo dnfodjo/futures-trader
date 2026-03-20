@@ -650,3 +650,326 @@ class TestRVOLBaseline:
             # Only the 9:30 trade should be included
             total_volume = sum(baseline.values())
             assert total_volume == 10  # Not 110
+
+
+# ── Aggregate Bars Tests ──────────────────────────────────────────────────
+
+
+class TestAggregateBars:
+    """Tests for DatabentoClient._aggregate_bars() static helper."""
+
+    def test_aggregate_4_bars_into_1(self):
+        """Should aggregate 4 bars into 1 with correct OHLCV logic."""
+        bars = [
+            {"timestamp": datetime(2026, 3, 14, 10, 0, tzinfo=UTC), "open": 100.0, "high": 110.0, "low": 95.0, "close": 105.0, "volume": 1000},
+            {"timestamp": datetime(2026, 3, 14, 11, 0, tzinfo=UTC), "open": 105.0, "high": 115.0, "low": 100.0, "close": 112.0, "volume": 1200},
+            {"timestamp": datetime(2026, 3, 14, 12, 0, tzinfo=UTC), "open": 112.0, "high": 120.0, "low": 108.0, "close": 118.0, "volume": 800},
+            {"timestamp": datetime(2026, 3, 14, 13, 0, tzinfo=UTC), "open": 118.0, "high": 125.0, "low": 110.0, "close": 122.0, "volume": 1500},
+        ]
+        result = DatabentoClient._aggregate_bars(bars, 4)
+        assert len(result) == 1
+        agg = result[0]
+        assert agg["timestamp"] == datetime(2026, 3, 14, 10, 0, tzinfo=UTC)  # first timestamp
+        assert agg["open"] == 100.0  # first open
+        assert agg["high"] == 125.0  # max high
+        assert agg["low"] == 95.0  # min low
+        assert agg["close"] == 122.0  # last close
+        assert agg["volume"] == 4500  # sum volume
+
+    def test_aggregate_discards_incomplete_chunk(self):
+        """Should discard the final incomplete chunk."""
+        bars = [
+            {"timestamp": datetime(2026, 3, 14, 10, 0, tzinfo=UTC), "open": 100.0, "high": 110.0, "low": 95.0, "close": 105.0, "volume": 1000},
+            {"timestamp": datetime(2026, 3, 14, 11, 0, tzinfo=UTC), "open": 105.0, "high": 115.0, "low": 100.0, "close": 112.0, "volume": 1200},
+            {"timestamp": datetime(2026, 3, 14, 12, 0, tzinfo=UTC), "open": 112.0, "high": 120.0, "low": 108.0, "close": 118.0, "volume": 800},
+            {"timestamp": datetime(2026, 3, 14, 13, 0, tzinfo=UTC), "open": 118.0, "high": 125.0, "low": 110.0, "close": 122.0, "volume": 1500},
+            # 5th bar — incomplete chunk of 4, should be discarded
+            {"timestamp": datetime(2026, 3, 14, 14, 0, tzinfo=UTC), "open": 122.0, "high": 130.0, "low": 120.0, "close": 128.0, "volume": 900},
+        ]
+        result = DatabentoClient._aggregate_bars(bars, 4)
+        assert len(result) == 1  # Only 1 complete chunk of 4
+
+    def test_aggregate_multiple_chunks(self):
+        """Should handle multiple complete chunks."""
+        bars = [
+            {"timestamp": datetime(2026, 3, i + 10, 10, 0, tzinfo=UTC), "open": float(100 + i), "high": float(110 + i), "low": float(90 + i), "close": float(105 + i), "volume": 1000}
+            for i in range(10)
+        ]
+        result = DatabentoClient._aggregate_bars(bars, 5)
+        assert len(result) == 2  # 10 bars / 5 = 2 chunks
+
+    def test_aggregate_empty_input(self):
+        """Should return empty list for empty input."""
+        result = DatabentoClient._aggregate_bars([], 4)
+        assert result == []
+
+    def test_aggregate_fewer_than_period(self):
+        """Should return empty if bars < period."""
+        bars = [
+            {"timestamp": datetime(2026, 3, 14, 10, 0, tzinfo=UTC), "open": 100.0, "high": 110.0, "low": 95.0, "close": 105.0, "volume": 1000},
+        ]
+        result = DatabentoClient._aggregate_bars(bars, 4)
+        assert result == []
+
+    def test_aggregate_weekly_from_daily(self):
+        """Should aggregate 5 daily bars into 1 weekly bar."""
+        bars = [
+            {"timestamp": datetime(2026, 3, 16 + i, 0, 0, tzinfo=UTC), "open": float(19800 + i * 10), "high": float(19850 + i * 10), "low": float(19780 + i * 10), "close": float(19840 + i * 10), "volume": 50000 + i * 1000}
+            for i in range(5)
+        ]
+        result = DatabentoClient._aggregate_bars(bars, 5)
+        assert len(result) == 1
+        assert result[0]["open"] == 19800.0  # first open
+        assert result[0]["high"] == 19890.0  # max of 19850..19890
+        assert result[0]["low"] == 19780.0  # min of 19780..19820
+        assert result[0]["close"] == 19880.0  # last close
+        assert result[0]["volume"] == 260000  # 50000+51000+52000+53000+54000
+
+
+# ── HTF Bar Fetch Tests ───────────────────────────────────────────────────
+
+
+class TestFetchHTFBars:
+    """Tests for DatabentoClient.fetch_htf_bars() static async method."""
+
+    def _make_ohlcv_record(self, open_p, high_p, low_p, close_p, volume, ts_ns):
+        """Create a mock OHLCV record matching Databento OhlcvMsg format."""
+        record = MagicMock()
+        type(record).__name__ = "Ohlcv1HMsg"
+        record.open = int(open_p * 1e9)
+        record.high = int(high_p * 1e9)
+        record.low = int(low_p * 1e9)
+        record.close = int(close_p * 1e9)
+        record.volume = volume
+        record.ts_event = ts_ns
+        return record
+
+    def _make_daily_record(self, open_p, high_p, low_p, close_p, volume, ts_ns):
+        """Create a mock daily OHLCV record."""
+        record = MagicMock()
+        type(record).__name__ = "Ohlcv1DMsg"
+        record.open = int(open_p * 1e9)
+        record.high = int(high_p * 1e9)
+        record.low = int(low_p * 1e9)
+        record.close = int(close_p * 1e9)
+        record.volume = volume
+        record.ts_event = ts_ns
+        return record
+
+    @pytest.mark.asyncio
+    async def test_fetch_1h_bars_returns_correct_format(self):
+        """Should fetch 1h bars and return list of dicts with correct keys."""
+        import sys
+
+        ts_ns = int(datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC).timestamp() * 1e9)
+        mock_record = self._make_ohlcv_record(19850.0, 19870.0, 19830.0, 19860.0, 5000, ts_ns)
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = [mock_record]
+
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            bars = await DatabentoClient.fetch_htf_bars(
+                api_key="test-key",
+                timeframe="1h",
+                lookback_days=60,
+            )
+
+        assert len(bars) == 1
+        bar = bars[0]
+        assert "timestamp" in bar
+        assert "open" in bar
+        assert "high" in bar
+        assert "low" in bar
+        assert "close" in bar
+        assert "volume" in bar
+        assert bar["open"] == pytest.approx(19850.0, rel=1e-6)
+        assert bar["high"] == pytest.approx(19870.0, rel=1e-6)
+        assert bar["low"] == pytest.approx(19830.0, rel=1e-6)
+        assert bar["close"] == pytest.approx(19860.0, rel=1e-6)
+        assert bar["volume"] == 5000
+
+    @pytest.mark.asyncio
+    async def test_fetch_1h_uses_correct_schema(self):
+        """1h timeframe should use ohlcv-1h schema."""
+        import sys
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = []
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            await DatabentoClient.fetch_htf_bars(api_key="test-key", timeframe="1h")
+
+        call_kwargs = mock_historical.timeseries.get_range.call_args
+        assert call_kwargs.kwargs.get("schema") == "ohlcv-1h" or call_kwargs[1].get("schema") == "ohlcv-1h"
+
+    @pytest.mark.asyncio
+    async def test_fetch_1d_uses_correct_schema(self):
+        """1d timeframe should use ohlcv-1d schema."""
+        import sys
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = []
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            await DatabentoClient.fetch_htf_bars(api_key="test-key", timeframe="1d")
+
+        call_kwargs = mock_historical.timeseries.get_range.call_args
+        assert call_kwargs.kwargs.get("schema") == "ohlcv-1d" or call_kwargs[1].get("schema") == "ohlcv-1d"
+
+    @pytest.mark.asyncio
+    async def test_fetch_4h_fetches_1h_and_aggregates(self):
+        """4h should fetch 1h bars then aggregate by 4."""
+        import sys
+
+        ts_base = int(datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC).timestamp() * 1e9)
+        records = []
+        for i in range(8):  # 8 hours = 2 x 4h bars
+            ts_ns = ts_base + i * 3600 * int(1e9)
+            records.append(self._make_ohlcv_record(
+                19850.0 + i, 19870.0 + i, 19830.0 + i, 19860.0 + i, 5000, ts_ns
+            ))
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = records
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            bars = await DatabentoClient.fetch_htf_bars(
+                api_key="test-key",
+                timeframe="4h",
+                lookback_days=60,
+            )
+
+        # Should use ohlcv-1h schema
+        call_kwargs = mock_historical.timeseries.get_range.call_args
+        schema_used = call_kwargs.kwargs.get("schema") or call_kwargs[1].get("schema")
+        assert schema_used == "ohlcv-1h"
+
+        # Should aggregate: 8 bars / 4 = 2 aggregated bars
+        assert len(bars) == 2
+
+    @pytest.mark.asyncio
+    async def test_fetch_1w_fetches_daily_and_aggregates(self):
+        """1w should fetch daily bars then aggregate by 5."""
+        import sys
+
+        ts_base = int(datetime(2026, 3, 10, 0, 0, 0, tzinfo=UTC).timestamp() * 1e9)
+        records = []
+        for i in range(10):  # 10 days = 2 weeks
+            ts_ns = ts_base + i * 86400 * int(1e9)
+            records.append(self._make_daily_record(
+                19850.0 + i, 19870.0 + i, 19830.0 + i, 19860.0 + i, 50000, ts_ns
+            ))
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = records
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            bars = await DatabentoClient.fetch_htf_bars(
+                api_key="test-key",
+                timeframe="1w",
+                lookback_days=730,
+            )
+
+        # Should use ohlcv-1d schema
+        call_kwargs = mock_historical.timeseries.get_range.call_args
+        schema_used = call_kwargs.kwargs.get("schema") or call_kwargs[1].get("schema")
+        assert schema_used == "ohlcv-1d"
+
+        # Should aggregate: 10 bars / 5 = 2 weekly bars
+        assert len(bars) == 2
+
+    @pytest.mark.asyncio
+    async def test_fetch_htf_bars_error_returns_empty(self):
+        """Should return empty list on API failure (graceful degradation)."""
+        import sys
+
+        mock_db = MagicMock()
+        mock_db.Historical.side_effect = Exception("API error")
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            bars = await DatabentoClient.fetch_htf_bars(
+                api_key="test-key",
+                timeframe="1h",
+            )
+
+        assert bars == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_htf_bars_fixed_point_prices(self):
+        """Should handle Databento fixed-point prices (/ 1e9)."""
+        import sys
+
+        ts_ns = int(datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC).timestamp() * 1e9)
+        record = MagicMock()
+        type(record).__name__ = "OhlcvMsg"
+        record.open = 19850_000_000_000  # fixed-point 1e9
+        record.high = 19870_000_000_000
+        record.low = 19830_000_000_000
+        record.close = 19860_000_000_000
+        record.volume = 5000
+        record.ts_event = ts_ns
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = [record]
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            bars = await DatabentoClient.fetch_htf_bars(
+                api_key="test-key",
+                timeframe="1h",
+            )
+
+        assert len(bars) == 1
+        assert bars[0]["open"] == pytest.approx(19850.0, rel=1e-6)
+        assert bars[0]["close"] == pytest.approx(19860.0, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_fetch_htf_bars_timestamp_is_datetime(self):
+        """Timestamp should be a timezone-aware datetime."""
+        import sys
+
+        ts_ns = int(datetime(2026, 3, 14, 10, 0, 0, tzinfo=UTC).timestamp() * 1e9)
+        mock_record = self._make_ohlcv_record(19850.0, 19870.0, 19830.0, 19860.0, 5000, ts_ns)
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = [mock_record]
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            bars = await DatabentoClient.fetch_htf_bars(
+                api_key="test-key",
+                timeframe="1h",
+            )
+
+        assert isinstance(bars[0]["timestamp"], datetime)
+        assert bars[0]["timestamp"].tzinfo is not None
+
+    @pytest.mark.asyncio
+    async def test_fetch_htf_bars_uses_parent_stype(self):
+        """Should use stype_in='parent' matching fetch_historical pattern."""
+        import sys
+
+        mock_historical = MagicMock()
+        mock_historical.timeseries.get_range.return_value = []
+        mock_db = MagicMock()
+        mock_db.Historical.return_value = mock_historical
+
+        with patch.dict(sys.modules, {"databento": mock_db}):
+            await DatabentoClient.fetch_htf_bars(api_key="test-key", timeframe="1h")
+
+        call_kwargs = mock_historical.timeseries.get_range.call_args
+        stype = call_kwargs.kwargs.get("stype_in") or call_kwargs[1].get("stype_in")
+        assert stype == "parent"

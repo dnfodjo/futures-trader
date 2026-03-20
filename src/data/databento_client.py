@@ -890,3 +890,178 @@ class DatabentoClient:
             lookback_days=lookback_days,
         )
         return baseline
+
+    # ── HTF Bar Fetching for Structure Analysis ───────────────────────────
+
+    @staticmethod
+    def _aggregate_bars(bars: list[dict], period: int) -> list[dict]:
+        """Aggregate bars into higher timeframe groups.
+
+        Used for 4h (aggregate 4x 1h bars).
+        OHLCV logic: first open, max high, min low, last close, sum volume.
+        Discards incomplete final chunk (if len(bars) % period != 0).
+        """
+        if not bars or period <= 0:
+            return []
+
+        complete_chunks = len(bars) // period
+        result: list[dict] = []
+
+        for i in range(complete_chunks):
+            chunk = bars[i * period : (i + 1) * period]
+            result.append({
+                "timestamp": chunk[0]["timestamp"],
+                "open": chunk[0]["open"],
+                "high": max(bar["high"] for bar in chunk),
+                "low": min(bar["low"] for bar in chunk),
+                "close": chunk[-1]["close"],
+                "volume": sum(bar["volume"] for bar in chunk),
+            })
+
+        return result
+
+    @staticmethod
+    def _aggregate_bars_by_week(bars: list[dict]) -> list[dict]:
+        """Aggregate daily bars into weekly bars aligned to ISO calendar weeks.
+
+        Groups by (year, iso_week) so holiday weeks (3-4 days) are still
+        captured as valid weekly bars. This avoids the count-based approach
+        where misalignment and dropped holiday weeks cause missing W levels.
+        """
+        from itertools import groupby
+
+        if not bars:
+            return []
+
+        def _week_key(bar: dict):
+            ts = bar["timestamp"]
+            if hasattr(ts, "isocalendar"):
+                cal = ts.isocalendar()
+                return (cal[0], cal[1])  # (year, week)
+            return None  # Skip bars with non-datetime timestamps
+
+        result: list[dict] = []
+        for key, group_iter in groupby(bars, key=_week_key):
+            if key is None:
+                continue
+            chunk = list(group_iter)
+            if not chunk:
+                continue
+            result.append({
+                "timestamp": chunk[0]["timestamp"],
+                "open": chunk[0]["open"],
+                "high": max(b["high"] for b in chunk),
+                "low": min(b["low"] for b in chunk),
+                "close": chunk[-1]["close"],
+                "volume": sum(b["volume"] for b in chunk),
+            })
+
+        return result
+
+    @staticmethod
+    async def fetch_htf_bars(
+        api_key: str,
+        symbol: str = "MNQ.FUT",
+        timeframe: str = "1h",
+        lookback_days: int = 60,
+        dataset: str = "GLBX.MDP3",
+    ) -> list[dict]:
+        """Fetch historical OHLCV bars from Databento for HTF structure analysis.
+
+        Args:
+            api_key: Databento API key.
+            symbol: Symbol to fetch (default MNQ.FUT auto-rolls).
+            timeframe: Bar timeframe — "1h", "4h", "1d", "1w".
+            lookback_days: Number of calendar days to look back.
+            dataset: Databento dataset (default CME).
+
+        Returns:
+            List of dicts: {timestamp, open, high, low, close, volume}.
+            Returns empty list on any error (graceful degradation).
+        """
+        # Schema mapping: native vs aggregated
+        # 1w uses calendar-week aggregation (not count-based) to handle holidays
+        schema_map = {
+            "1h": ("ohlcv-1h", None),
+            "4h": ("ohlcv-1h", 4),
+            "1d": ("ohlcv-1d", None),
+            "1w": ("ohlcv-1d", "weekly"),  # special: calendar-week grouping
+        }
+
+        if timeframe not in schema_map:
+            logger.error("databento.htf_invalid_timeframe", timeframe=timeframe)
+            return []
+
+        schema, aggregate_period = schema_map[timeframe]
+
+        try:
+            import databento as db
+        except ImportError:
+            logger.error("databento.htf_import_failed", error="databento package not installed")
+            return []
+
+        try:
+            client = db.Historical(key=api_key)
+
+            # Date calculation with weekend buffer (matches compute_rvol_baseline pattern)
+            end_date = datetime.now(tz=UTC)
+            start_date = end_date - timedelta(days=int(lookback_days * 1.5 + 5))
+
+            data = client.timeseries.get_range(
+                dataset=dataset,
+                schema=schema,
+                stype_in="parent",
+                symbols=[symbol],
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+            )
+
+            bars: list[dict] = []
+            for record in data:
+                record_type = type(record).__name__
+
+                # Accept any OHLCV record type (OhlcvMsg, Ohlcv1HMsg, Ohlcv1DMsg, etc.)
+                if "Ohlcv" not in record_type and "ohlcv" not in record_type.lower():
+                    continue
+
+                # Fixed-point price handling (/ 1e9 if > 1e6)
+                open_price = record.open / 1e9 if record.open > 1e6 else record.open
+                high_price = record.high / 1e9 if record.high > 1e6 else record.high
+                low_price = record.low / 1e9 if record.low > 1e6 else record.low
+                close_price = record.close / 1e9 if record.close > 1e6 else record.close
+
+                # Timestamp from nanoseconds
+                ts_event = record.ts_event
+                if isinstance(ts_event, (int, float)):
+                    ts = datetime.fromtimestamp(ts_event / 1e9, tz=UTC)
+                elif isinstance(ts_event, datetime):
+                    ts = ts_event
+                else:
+                    ts = datetime.now(tz=UTC)
+
+                bars.append({
+                    "timestamp": ts,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": record.volume,
+                })
+
+            # Aggregate if needed (4h from 1h, 1w from daily)
+            if aggregate_period == "weekly":
+                bars = DatabentoClient._aggregate_bars_by_week(bars)
+            elif aggregate_period is not None:
+                bars = DatabentoClient._aggregate_bars(bars, aggregate_period)
+
+            logger.info(
+                "databento.htf_bars_fetched",
+                timeframe=timeframe,
+                bars=len(bars),
+                lookback_days=lookback_days,
+            )
+            return bars
+
+        except Exception as e:
+            logger.error("databento.htf_fetch_failed", timeframe=timeframe, error=str(e))
+            return []

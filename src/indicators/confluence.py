@@ -1,12 +1,13 @@
-"""6-Factor Confluence Scoring Engine for MNQ Smart Money Strategy.
+"""7-Factor Confluence Scoring Engine for MNQ Smart Money Strategy.
 
-Scores potential entries on a 0-6 scale across:
+Scores potential entries on a 0-9 scale across:
   1. Market Speed   (FILTER - not scored, but can block)
   2. Trend          (1 point - multi-TF EMA alignment)
   3. Order Block    (2 points - ICT order block tap)
   4. Candle Pattern (1 point - engulfing / rejection / strong body)
   5. Liquidity Sweep(1 point - swept swing pivots or session levels)
   6. Volume         (1 point - above-average volume)
+  7. Structure      (up to 3 points - HTF S/R bounce or BOS, gated by core>=2)
 
 Usage:
     engine = ConfluenceEngine()
@@ -22,14 +23,19 @@ Usage:
         atr=4.5,
         multi_tf_emas={"5m": {"ema_9": ..., "ema_50": ...}, ...},
         session_levels={"asian_high": ..., "asian_low": ..., ...},
+        bars_5m=[...],   # optional, for structure bounce confirmation
     )
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from src.indicators.structure_levels import StructureLevelManager
 
 logger = structlog.get_logger()
 
@@ -106,7 +112,11 @@ class ConfluenceEngine:
     when evaluating a potential entry.
     """
 
-    def __init__(self) -> None:
+    # Timeframe-weighted points for structure factor
+    BOUNCE_POINTS: dict[str, int] = {"1h": 1, "4h": 1, "D": 2, "W": 2}
+    BOS_POINTS: dict[str, int] = {"1h": 1, "4h": 2, "D": 2, "W": 3}
+
+    def __init__(self, structure_manager: StructureLevelManager | None = None) -> None:
         # Order blocks per side
         self._bull_obs: list[OrderBlock] = []
         self._bear_obs: list[OrderBlock] = []
@@ -120,6 +130,9 @@ class ConfluenceEngine:
 
         # Watermark for OB detection — avoid re-scanning entire bar history
         self._last_ob_scan_len: int = 0
+
+        # HTF structure level manager (optional)
+        self._structure_manager = structure_manager
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,8 +162,9 @@ class ConfluenceEngine:
         atr: float,
         multi_tf_emas: dict,
         session_levels: dict,
+        bars_5m: list[dict] | None = None,
     ) -> dict:
-        """Score a potential entry on a 0-6 scale.
+        """Score a potential entry on a 0-9 scale.
 
         Args:
             side: ``"long"`` or ``"short"``.
@@ -205,6 +219,29 @@ class ConfluenceEngine:
         vol_result = self._score_volume(side, bars_1m)
         factors["volume"] = vol_result
         total_score += vol_result["score"]
+
+        # --- 7. Structure (HTF S/R) ---
+        structure_result = self._score_structure(side, last_price, bars_1m, bars_5m or [])
+        factors["structure"] = structure_result
+
+        # Structure block (trading against D/W levels)
+        if structure_result.get("blocked"):
+            blocked = True
+            block_reason = block_reason or structure_result["block_reason"]
+
+        # Core >= 2 safeguard: structure points only count if at least 2 of 5 core factors score
+        core_score = sum(factors[f]["score"] for f in ("trend", "order_block", "candle", "sweep", "volume"))
+        if core_score >= 2:
+            total_score += structure_result["score"]
+        else:
+            # Log that structure was suppressed
+            if structure_result["score"] > 0:
+                logger.info(
+                    "confluence.structure_suppressed",
+                    structure_score=structure_result["score"],
+                    core_score=core_score,
+                    msg=f"Structure +{structure_result['score']} suppressed (core={core_score} < 2)",
+                )
 
         result = {
             "score": total_score,
@@ -802,6 +839,57 @@ class ConfluenceEngine:
         return {
             "score": 0,
             "detail": f"volume {volume_ratio:.1f}x avg (need {VOLUME_SPIKE_MULT}x)",
+        }
+
+    # ------------------------------------------------------------------
+    # Factor 7: HTF Structure (bounce / BOS)
+    # ------------------------------------------------------------------
+
+    def _score_structure(
+        self, side: str, last_price: float, bars_1m: list[dict], bars_5m: list[dict]
+    ) -> dict:
+        """Score the structure factor (bounce + BOS) with timeframe weighting."""
+        if self._structure_manager is None:
+            return {"score": 0, "detail": "no HTF structure manager", "blocked": False, "block_reason": ""}
+
+        # Compute volume for BOS detection from 1-min bars
+        cur_volume = bars_1m[-1].get("volume", 0.0) if bars_1m else 0.0
+        vol_lookback = bars_1m[-21:-1] if len(bars_1m) > 1 else []
+        avg_vol = (
+            sum(b.get("volume", 0) for b in vol_lookback) / len(vol_lookback)
+            if vol_lookback else 0.0
+        )
+
+        result = self._structure_manager.check_proximity(
+            last_price, side, bars_1m, bars_5m,
+            current_volume=cur_volume,
+            avg_volume=avg_vol,
+        )
+
+        score = 0
+        details: list[str] = []
+        level = result.get("nearest_level")
+        tf = level.timeframe if level else None
+
+        # BOS takes priority over bounce (mutually exclusive)
+        # Use the actual broken level's TF for BOS points, not nearest_level's TF
+        bos_tf = result.get("bos_tf")
+        if result.get("bos_score") and bos_tf:
+            pts = self.BOS_POINTS.get(bos_tf, 1)
+            score = pts
+            details.append(f"BOS through {bos_tf} level (+{pts})")
+        elif result.get("bounce_score") and tf:
+            pts = self.BOUNCE_POINTS.get(tf, 1)
+            score = pts
+            details.append(f"bounce at {tf} {level.level_type} (+{pts})")
+
+        score = min(score, 3)  # Safety cap
+
+        return {
+            "score": score,
+            "detail": ", ".join(details) if details else "no HTF structure",
+            "blocked": result.get("blocked", False),
+            "block_reason": result.get("block_reason", ""),
         }
 
     # ------------------------------------------------------------------
