@@ -499,14 +499,19 @@ class TestIsForwardRoll:
     def test_forward_roll_z_to_h_next_year(self):
         assert DatabentoClient.is_forward_roll("MNQZ5", "MNQH6") is True
 
+    def test_forward_roll_z9_to_h0_decade_wrap(self):
+        """Must not break at decade boundary (2029→2030)."""
+        assert DatabentoClient.is_forward_roll("MNQZ9", "MNQH0") is True
+
     def test_backward_roll_m_to_h(self):
         assert DatabentoClient.is_forward_roll("MNQM6", "MNQH6") is False
 
     def test_same_contract(self):
         assert DatabentoClient.is_forward_roll("MNQM6", "MNQM6") is False
 
-    def test_backward_roll_h6_to_z5(self):
-        assert DatabentoClient.is_forward_roll("MNQH6", "MNQZ5") is False
+    def test_cross_year_always_allowed(self):
+        """Different year digits always allowed (volume already validated)."""
+        assert DatabentoClient.is_forward_roll("MNQH6", "MNQZ5") is True
 
     def test_invalid_symbol_format(self):
         assert DatabentoClient.is_forward_roll("MNQ", "MNQM6") is False

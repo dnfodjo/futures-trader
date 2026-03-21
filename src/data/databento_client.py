@@ -110,33 +110,32 @@ class DatabentoClient:
 
     # ── Contract Auto-Roll ───────────────────────────────────────────────
 
-    # Contract month codes → calendar order (for forward-only roll check)
-    _MONTH_ORDER: dict[str, int] = {"H": 3, "M": 6, "U": 9, "Z": 12}
-
     @staticmethod
     def is_forward_roll(current_symbol: str, new_symbol: str) -> bool:
         """Check if rolling from current to new is a forward roll.
 
+        Only blocks rolling to a CLEARLY OLDER contract within the same
+        year digit.  Cross-year rolls (Z9→H0) are always allowed because
+        the volume-based resolver already picked the right contract.
+
         MNQ contract format: MNQ{month_code}{year_digit}
         Month codes: H=Mar(3), M=Jun(6), U=Sep(9), Z=Dec(12)
-        Year digit: last digit of year (e.g., 6 = 2026)
-
-        Returns True if new_symbol is a LATER contract than current_symbol.
         """
-        order = DatabentoClient._MONTH_ORDER
+        month_order = {"H": 1, "M": 2, "U": 3, "Z": 4}
         try:
-            cur_month = order.get(current_symbol[3], 0)
-            cur_year = int(current_symbol[4])
-            new_month = order.get(new_symbol[3], 0)
-            new_year = int(new_symbol[4])
-        except (IndexError, ValueError):
+            cur_month = month_order.get(current_symbol[3], 0)
+            cur_year = current_symbol[4]
+            new_month = month_order.get(new_symbol[3], 0)
+            new_year = new_symbol[4]
+        except IndexError:
             return False
 
-        if new_year > cur_year:
+        # Different year digit → allow (covers both 6→7 and 9→0 decade wrap)
+        if new_year != cur_year:
             return True
-        if new_year == cur_year and new_month > cur_month:
-            return True
-        return False
+
+        # Same year: only allow if new month is later (H→M ok, M→H blocked)
+        return new_month > cur_month
 
     @staticmethod
     def resolve_front_month(
