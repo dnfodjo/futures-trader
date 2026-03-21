@@ -115,10 +115,15 @@ class DatabentoClient:
         api_key: str,
         dataset: str = "GLBX.MDP3",
     ) -> str | None:
-        """Resolve the current front-month MNQ contract via Databento symbology.
+        """Resolve the current front-month MNQ contract via Databento.
 
-        Uses the parent symbol ``MNQ.FUT`` with ``stype_in="parent"`` to get all
-        active MNQ contract months, then picks the nearest expiration (front month).
+        Uses ``MNQ.c.0`` (continuous front-month) with the ``definition`` schema
+        to fetch the instrument definition record, which contains the ``raw_symbol``
+        field (e.g., "MNQM6").
+
+        Note: ``symbology.resolve()`` only supports ``stype_out="instrument_id"``,
+        so we use ``timeseries.get_range(schema="definition")`` instead, which
+        returns the full instrument definition including the raw symbol.
 
         MNQ contract months: H=Mar, M=Jun, U=Sep, Z=Dec.
         Example: In March 2026, this returns "MNQM6" (June 2026 front month).
@@ -134,43 +139,34 @@ class DatabentoClient:
 
         try:
             client = db.Historical(key=api_key)
-            today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+            today = datetime.now(tz=UTC)
+            # Use a 1-day window ending now to get current definitions
+            start = today.strftime("%Y-%m-%dT00:00")
+            end = today.strftime("%Y-%m-%dT%H:%M")
 
-            resolution = client.symbology.resolve(
+            data = client.timeseries.get_range(
                 dataset=dataset,
-                symbols=["MNQ.FUT"],
-                stype_in="parent",
-                stype_out="raw_symbol",
-                start_date=today,
-                end_date=today,
+                symbols=["MNQ.c.0"],
+                stype_in="continuous",
+                schema="definition",
+                start=start,
+                end=end,
             )
 
-            # Result format: {"MNQ.FUT": [{"d0": "2026-03-21", "d1": "2026-06-20", "s": "MNQM6"}, ...]}
-            # Each mapping has d0 (start), d1 (end/expiry), s (raw symbol).
-            # The front month is the contract with the NEAREST d1 (expiry) that
-            # is still in the future or is today.
-            mappings = resolution.result.get("MNQ.FUT", [])
-            if not mappings:
-                logger.warning("databento.resolve_front_month_empty")
-                return None
+            # Parse instrument definition records for raw_symbol
+            for record in data:
+                raw_symbol = getattr(record, "raw_symbol", None)
+                if raw_symbol:
+                    # Strip null bytes that Databento sometimes includes
+                    raw_symbol = raw_symbol.rstrip("\x00").strip()
+                    if raw_symbol.startswith("MNQ"):
+                        logger.info(
+                            "databento.front_month_resolved",
+                            raw_symbol=raw_symbol,
+                        )
+                        return raw_symbol
 
-            # Pick the first mapping — Databento returns them in chronological
-            # order, so the first one with a valid symbol is the front month.
-            # Filter out any that don't have a symbol.
-            for m in mappings:
-                raw_symbol = m.get("s") if isinstance(m, dict) else None
-                if raw_symbol and raw_symbol.startswith("MNQ"):
-                    logger.info(
-                        "databento.front_month_resolved",
-                        raw_symbol=raw_symbol,
-                        expiry=m.get("d1", "unknown"),
-                    )
-                    return raw_symbol
-
-            logger.warning(
-                "databento.resolve_front_month_no_mnq",
-                mappings=str(mappings[:3]),
-            )
+            logger.warning("databento.resolve_front_month_empty")
             return None
 
         except Exception:
