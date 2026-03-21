@@ -1541,7 +1541,18 @@ class StateEngine:
                 )
                 return False
 
-            self.warm_1min_bars(bars)
+            # Validate bars have real prices (not weekend garbage with 0.0)
+            valid_bars = [b for b in bars if b.get("close", 0) > 1000]
+            if len(valid_bars) < 10:
+                logger.info(
+                    "state_engine.persisted_bars_no_valid_prices",
+                    total=len(bars),
+                    valid=len(valid_bars),
+                    msg="Persisted bars have no real prices — will fetch from historical",
+                )
+                return False
+
+            self.warm_1min_bars(valid_bars)
             logger.info(
                 "state_engine.bars_reloaded_from_disk",
                 bar_count=len(self._1min_bars),
