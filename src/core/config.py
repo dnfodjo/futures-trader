@@ -9,15 +9,8 @@ and is constructed independently so a flat .env file works correctly.
 
 from __future__ import annotations
 
-import warnings
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from pydantic import Field, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# Month codes for MNQ quarterly contracts
-_MONTH_CODES = {3: "H", 6: "M", 9: "U", 12: "Z"}
 
 
 class TradovateConfig(BaseSettings):
@@ -87,6 +80,9 @@ class TradingConfig(BaseSettings):
     tick_size: float = 0.25
     tick_value: float = 0.50
     commission_per_rt: float = 0.86  # Tradovate active plan round trip
+
+    # Position sizing
+    max_entry_contracts: int = 5  # max contracts per single entry (user adjusts to scale)
 
     # Hard limits (guardrails — LLM CANNOT override)
     # Reduced from 10 to 6 — smaller positions + wider stops = better risk/reward
@@ -165,68 +161,18 @@ class TradingConfig(BaseSettings):
     time_exit_reassess_min: int = 15  # reassess if trade stale after 15 min
     time_exit_force_min: int = 25  # suggest flatten after 25 min of no progress
 
+    # Partial profit taking
+    partial_profit_points: float = 15.0     # take 1st contract off at +15pts
+    partial_quantity: int = 1               # close 1 of 2 contracts
+    partial_breakeven_offset: float = 1.0   # move stop to entry + 1pt after partial
+    eth_partial_profit_points: float = 10.0 # tighter for ETH ranges
+
     # Apex Trader Funding compliance
     apex_enabled: bool = False  # enable Apex rule enforcement
     apex_account_type: str = "50k"  # 25k, 50k, 100k, 150k
     apex_flatten_deadline: str = "16:54"  # ET — 5min buffer before 4:59 PM
     apex_drawdown_lockout_pct: float = 0.75  # block entries at 75% drawdown used
 
-    @model_validator(mode="after")
-    def check_contract_rollover(self) -> TradingConfig:
-        """Warn if the configured contract symbol may be near expiration."""
-        symbol = self.symbol.upper()
-        if not symbol.startswith("MNQ") or len(symbol) < 5:
-            return self
-
-        month_code = symbol[3]
-        year_digit = symbol[4]
-
-        code_to_month = {"H": 3, "M": 6, "U": 9, "Z": 12}
-        if month_code not in code_to_month:
-            return self
-
-        contract_month = code_to_month[month_code]
-        contract_year = 2020 + int(year_digit)  # works through 2029
-
-        now = datetime.now(ZoneInfo("US/Eastern"))
-        # Contracts expire 3rd Friday of the expiration month.
-        # Warn if within 14 days of the end of the contract month.
-        expiry_approx = datetime(
-            contract_year, contract_month, 20, tzinfo=ZoneInfo("US/Eastern")
-        )
-        days_until = (expiry_approx - now).days
-
-        if days_until < 0:
-            warnings.warn(
-                f"Contract {symbol} appears to have expired. "
-                f"Update TRADE_SYMBOL to the next front-month contract. "
-                f"Current front months: {_get_next_contract_symbol(now)}",
-                stacklevel=1,
-            )
-        elif days_until < 14:
-            warnings.warn(
-                f"Contract {symbol} expires in ~{days_until} days. "
-                f"Consider rolling to {_get_next_contract_symbol(now)}",
-                stacklevel=1,
-            )
-
-        return self
-
-
-def _get_next_contract_symbol(now: datetime) -> str:
-    """Get the next front-month MNQ contract symbol."""
-    month = now.month
-    year = now.year
-
-    # Find next expiration month (Mar, Jun, Sep, Dec)
-    for exp_month in [3, 6, 9, 12]:
-        if exp_month >= month:
-            code = _MONTH_CODES[exp_month]
-            return f"MNQ{code}{year % 10}"
-
-    # Wrap to next year
-    code = _MONTH_CODES[3]  # March
-    return f"MNQ{code}{(year + 1) % 10}"
 
 
 class QuantLynkConfig(BaseSettings):

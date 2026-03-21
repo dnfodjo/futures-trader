@@ -195,10 +195,12 @@ class TestInitialization:
 # ── Decision Cycle ──────────────────────────────────────────────────────────
 
 
+@patch("src.orchestrator.clock.get_session_phase", return_value=SessionPhase.MORNING)
 class TestDecisionCycle:
     @pytest.mark.asyncio
-    async def test_do_nothing_skips_guardrails(self, orchestrator, mock_reasoner, mock_guardrails):
+    async def test_do_nothing_skips_guardrails(self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails):
         """DO_NOTHING decision should not invoke guardrails or execution."""
+        orchestrator._start_time = time.monotonic() - 200  # past warmup
         mock_reasoner.decide = AsyncMock(return_value=LLMAction(
             action=ActionType.DO_NOTHING,
             reasoning="No setup",
@@ -213,9 +215,10 @@ class TestDecisionCycle:
 
     @pytest.mark.asyncio
     async def test_stop_trading_sets_session_stop(
-        self, orchestrator, mock_reasoner, mock_session_ctrl
+        self, _mock_phase, orchestrator, mock_reasoner, mock_session_ctrl
     ):
         """STOP_TRADING decision should call session_ctrl.force_stop."""
+        orchestrator._start_time = time.monotonic() - 200  # past warmup
         mock_reasoner.decide = AsyncMock(return_value=LLMAction(
             action=ActionType.STOP_TRADING,
             reasoning="Cost cap exceeded",
@@ -229,9 +232,10 @@ class TestDecisionCycle:
 
     @pytest.mark.asyncio
     async def test_enter_goes_through_full_pipeline(
-        self, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
+        self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
     ):
         """ENTER action flows: LLM → guardrails → execution."""
+        orchestrator._start_time = time.monotonic() - 200
         action = _enter_action()
         mock_reasoner.decide = AsyncMock(return_value=action)
         mock_guardrails.check = MagicMock(return_value=GuardrailResult(allowed=True))
@@ -245,9 +249,10 @@ class TestDecisionCycle:
 
     @pytest.mark.asyncio
     async def test_blocked_action_not_executed(
-        self, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
+        self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
     ):
         """Blocked guardrail result should prevent execution."""
+        orchestrator._start_time = time.monotonic() - 200
         mock_reasoner.decide = AsyncMock(return_value=_enter_action())
         mock_guardrails.check = MagicMock(return_value=GuardrailResult(
             allowed=False,
@@ -261,9 +266,10 @@ class TestDecisionCycle:
 
     @pytest.mark.asyncio
     async def test_modified_quantity_applied(
-        self, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
+        self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
     ):
         """Modified quantity from guardrails should be applied to the action."""
+        orchestrator._start_time = time.monotonic() - 200
         action = _enter_action(quantity=5)
         mock_reasoner.decide = AsyncMock(return_value=action)
         mock_guardrails.check = MagicMock(return_value=GuardrailResult(
@@ -279,7 +285,7 @@ class TestDecisionCycle:
         assert executed_action.action == ActionType.ENTER
 
     @pytest.mark.asyncio
-    async def test_no_state_skips_cycle(self, orchestrator, mock_reasoner):
+    async def test_no_state_skips_cycle(self, _mock_phase, orchestrator, mock_reasoner):
         """If state_provider returns None, decision cycle should skip."""
         orchestrator._state_provider = lambda: None
 
@@ -289,9 +295,10 @@ class TestDecisionCycle:
 
     @pytest.mark.asyncio
     async def test_execution_error_increments_errors(
-        self, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
+        self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
     ):
         """Execution failure should increment error count, not crash."""
+        orchestrator._start_time = time.monotonic() - 200
         mock_reasoner.decide = AsyncMock(return_value=_enter_action())
         mock_guardrails.check = MagicMock(return_value=GuardrailResult(allowed=True))
         mock_order_manager.execute = AsyncMock(side_effect=RuntimeError("Connection lost"))
@@ -305,12 +312,14 @@ class TestDecisionCycle:
 # ── Guardrail Integration ──────────────────────────────────────────────────
 
 
+@patch("src.orchestrator.clock.get_session_phase", return_value=SessionPhase.MORNING)
 class TestGuardrailIntegration:
     @pytest.mark.asyncio
     async def test_passes_session_ctrl_values_to_guardrails(
-        self, orchestrator, mock_reasoner, mock_guardrails, mock_session_ctrl
+        self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails, mock_session_ctrl
     ):
         """Guardrails should receive daily PnL, consecutive losers, etc."""
+        orchestrator._start_time = time.monotonic() - 200
         mock_session_ctrl.daily_pnl = -250.0
         mock_session_ctrl.consecutive_losers = 3
         mock_session_ctrl.effective_max_contracts = 4
@@ -597,12 +606,14 @@ class TestCycleInterval:
 # ── Stats ───────────────────────────────────────────────────────────────────
 
 
+@patch("src.orchestrator.clock.get_session_phase", return_value=SessionPhase.MORNING)
 class TestStats:
     @pytest.mark.asyncio
     async def test_stats_after_cycles(
-        self, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
+        self, _mock_phase, orchestrator, mock_reasoner, mock_guardrails, mock_order_manager
     ):
         """Stats should track decisions, executions, and blocks."""
+        orchestrator._start_time = time.monotonic() - 200
         # Run one successful cycle
         mock_reasoner.decide = AsyncMock(return_value=_enter_action())
         mock_guardrails.check = MagicMock(return_value=GuardrailResult(allowed=True))
@@ -620,7 +631,7 @@ class TestStats:
         assert stats["actions_blocked"] == 1
 
     @pytest.mark.asyncio
-    async def test_stats_include_subsystem_stats(self, orchestrator):
+    async def test_stats_include_subsystem_stats(self, _mock_phase, orchestrator):
         """Stats should include session, guardrail, and reasoner sub-stats."""
         stats = orchestrator.stats
         assert "session" in stats
@@ -693,12 +704,14 @@ class TestPreMarket:
 # ── Event Integration ───────────────────────────────────────────────────────
 
 
+@patch("src.orchestrator.clock.get_session_phase", return_value=SessionPhase.MORNING)
 class TestEventIntegration:
     @pytest.mark.asyncio
     async def test_execution_publishes_order_filled_event(
-        self, orchestrator, bus, mock_reasoner, mock_guardrails, mock_order_manager
+        self, _mock_phase, orchestrator, bus, mock_reasoner, mock_guardrails, mock_order_manager
     ):
         """Successful execution should publish ORDER_FILLED event."""
+        orchestrator._start_time = time.monotonic() - 200
         events_received = []
         bus.subscribe(EventType.ORDER_FILLED, lambda e: events_received.append(e))
 
@@ -718,12 +731,14 @@ class TestEventIntegration:
 # ── Consecutive LLM Errors ──────────────────────────────────────────────────
 
 
+@patch("src.orchestrator.clock.get_session_phase", return_value=SessionPhase.MORNING)
 class TestConsecutiveLLMErrors:
     @pytest.mark.asyncio
     async def test_single_llm_error_increments_consecutive(
-        self, orchestrator, mock_reasoner
+        self, _mock_phase, orchestrator, mock_reasoner
     ):
         """A single LLM error should increment consecutive counter."""
+        orchestrator._start_time = time.monotonic() - 200
         mock_reasoner.decide = AsyncMock(side_effect=RuntimeError("LLM timeout"))
         orchestrator._last_state = _market_state()
 
@@ -735,9 +750,10 @@ class TestConsecutiveLLMErrors:
 
     @pytest.mark.asyncio
     async def test_consecutive_errors_reset_on_success(
-        self, orchestrator, mock_reasoner
+        self, _mock_phase, orchestrator, mock_reasoner
     ):
         """Successful decision should reset consecutive error counter."""
+        orchestrator._start_time = time.monotonic() - 200
         # First: cause 2 errors
         mock_reasoner.decide = AsyncMock(side_effect=RuntimeError("LLM timeout"))
         orchestrator._last_state = _market_state()
@@ -756,9 +772,10 @@ class TestConsecutiveLLMErrors:
 
     @pytest.mark.asyncio
     async def test_three_consecutive_errors_triggers_shutdown(
-        self, orchestrator, mock_reasoner
+        self, _mock_phase, orchestrator, mock_reasoner
     ):
         """3 consecutive LLM failures should trigger emergency shutdown."""
+        orchestrator._start_time = time.monotonic() - 200
         mock_reasoner.decide = AsyncMock(side_effect=RuntimeError("LLM timeout"))
         orchestrator._last_state = _market_state()
 
@@ -770,9 +787,10 @@ class TestConsecutiveLLMErrors:
 
     @pytest.mark.asyncio
     async def test_two_errors_no_shutdown(
-        self, orchestrator, mock_reasoner
+        self, _mock_phase, orchestrator, mock_reasoner
     ):
         """2 consecutive LLM failures should NOT trigger shutdown."""
+        orchestrator._start_time = time.monotonic() - 200
         mock_reasoner.decide = AsyncMock(side_effect=RuntimeError("LLM timeout"))
         orchestrator._last_state = _market_state()
 

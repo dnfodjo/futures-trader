@@ -40,9 +40,12 @@ class SessionRuleGuardrail:
         SessionPhase.DAILY_HALT,
     })
 
-    # Phases where position size is reduced (thin liquidity)
+    # Phases where position size is reduced (thin liquidity).
+    # MIDDAY removed — it has decent liquidity (regular US hours) and the
+    # higher confluence threshold (4 vs 3) already provides sufficient
+    # protection. Halving on top of higher threshold was double-penalizing
+    # strong midday setups.
     REDUCED_SIZE_PHASES = frozenset({
-        SessionPhase.MIDDAY,
         SessionPhase.ASIAN,
         SessionPhase.POST_RTH,
     })
@@ -92,14 +95,30 @@ class SessionRuleGuardrail:
                 reason=f"session_rule: daily loss limit hit (${daily_pnl:.2f})",
             )
 
-        # 2. Consecutive losers
+        # 2. Consecutive losers — reduce to 1 contract instead of blocking.
+        # After 4+ consecutive losses, the daily loss limit ($400) is the real
+        # circuit breaker. Blocking entirely can prevent recovery on the best
+        # setup of the day. 1 contract limits risk ($2/pt, max ~$50 on 25pt stop)
+        # while still allowing the system to trade.
         if consecutive_losers >= self._max_consecutive_losers:
+            orig_qty = action.quantity if action.quantity is not None else 1
+            if orig_qty > 1:
+                logger.warning(
+                    "session_rule.consecutive_losers_min_size",
+                    consecutive=consecutive_losers,
+                    max=self._max_consecutive_losers,
+                    original_qty=orig_qty,
+                    msg=f"{consecutive_losers} consecutive losers — reducing to 1 contract (was {orig_qty})",
+                )
+            else:
+                logger.info(
+                    "session_rule.consecutive_losers_min_size",
+                    consecutive=consecutive_losers,
+                    msg=f"{consecutive_losers} consecutive losers — already at minimum size, allowing",
+                )
             return GuardrailResult(
-                allowed=False,
-                reason=(
-                    f"session_rule: {consecutive_losers} consecutive losers "
-                    f"(max: {self._max_consecutive_losers})"
-                ),
+                allowed=True,
+                modified_quantity=1,
             )
 
         # 2b. Max daily trades (hard cap to prevent overtrading)

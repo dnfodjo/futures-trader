@@ -168,14 +168,15 @@ class TestBlocked:
         assert result.allowed is False
         assert "daily loss" in result.reason
 
-    def test_blocked_by_consecutive_losers(self, engine):
+    def test_min_size_on_consecutive_losers(self, engine):
+        """4+ consecutive losers reduces to 1 contract (not blocked)."""
         result = engine.check(
             _action(ActionType.ENTER),
             _state(),
             consecutive_losers=5,
         )
-        assert result.allowed is False
-        assert "consecutive losers" in result.reason
+        assert result.allowed is True
+        assert result.modified_quantity == 1
 
     def test_blocked_by_low_confidence(self, engine):
         result = engine.check(

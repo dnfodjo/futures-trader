@@ -45,6 +45,7 @@ logger = structlog.get_logger()
 _PERSIST_PATH = Path("data/tick_stop_state.json")
 
 FlattenFn = Callable[[float], Coroutine[Any, Any, Any]]
+PartialFn = Callable[..., Coroutine[Any, Any, Any]]
 
 
 class TickStopMonitor:
@@ -112,6 +113,13 @@ class TickStopMonitor:
         self._grace_period_sec: float = 3.0
         self._activation_time: float = 0.0
 
+        # Partial profit taking
+        self._partial_taken: bool = False
+        self._partial_target: float = 0.0
+        self._partial_fn: Optional[PartialFn] = None
+        self._partial_quantity: int = 1
+        self._breakeven_offset: float = 1.0
+
         # Stats
         self._ticks_processed: int = 0
         self._last_price: float = 0.0
@@ -133,6 +141,10 @@ class TickStopMonitor:
         eth_mid_tightened_distance: float = 4.0,
         eth_tighten_at_profit: float = 8.0,
         eth_tightened_distance: float = 3.0,
+        partial_target_points: float = 0.0,
+        partial_fn: Optional[PartialFn] = None,
+        partial_quantity: int = 1,
+        breakeven_offset: float = 1.0,
     ) -> None:
         """Activate monitoring for a new position.
 
@@ -163,6 +175,19 @@ class TickStopMonitor:
         self._trigger_reason = ""
         self._ticks_processed = 0
         self._activation_time = time.monotonic()
+
+        # Partial profit taking
+        self._partial_taken = False
+        self._partial_fn = partial_fn
+        self._partial_quantity = partial_quantity
+        self._breakeven_offset = breakeven_offset
+        if partial_target_points > 0 and partial_fn is not None:
+            if self._side == "long":
+                self._partial_target = entry_price + partial_target_points
+            else:
+                self._partial_target = entry_price - partial_target_points
+        else:
+            self._partial_target = 0.0
 
         # ETH session: override trail params with tighter values
         if is_eth:
@@ -215,6 +240,12 @@ class TickStopMonitor:
         self._active = False
         self._side = None
         self._trail_active = False
+        # Reset partial state
+        self._partial_taken = False
+        self._partial_target = 0.0
+        self._partial_fn = None
+        self._partial_quantity = 1
+        self._breakeven_offset = 1.0
         logger.info(
             "tick_stop_monitor.deactivated",
             ticks_processed=self._ticks_processed,
@@ -313,6 +344,17 @@ class TickStopMonitor:
         # Update trail (always, even during grace period)
         self._update_trail(price)
 
+        # Check partial profit (skip during grace period)
+        if (
+            not in_grace
+            and not self._partial_taken
+            and self._partial_target > 0
+            and self._partial_fn is not None
+            and self._check_partial(price)
+        ):
+            self._partial_taken = True
+            await self._execute_partial(price)
+
         # Check stop-loss (skip during grace period)
         if not in_grace and self._check_stop(price):
             self._triggered = True
@@ -370,6 +412,52 @@ class TickStopMonitor:
             return price <= self._take_profit_price
 
         return False
+
+    # ── Partial Profit Logic ────────────────────────────────────────────────
+
+    def _check_partial(self, price: float) -> bool:
+        """Check if price has reached the partial profit target."""
+        if self._side == "long":
+            return price >= self._partial_target
+        elif self._side == "short":
+            return price <= self._partial_target
+        return False
+
+    async def _execute_partial(self, price: float) -> None:
+        """Execute partial close and move stop to breakeven."""
+        try:
+            await self._partial_fn(
+                side=self._side,
+                quantity=self._partial_quantity,
+                price=price,
+            )
+
+            # Move stop to breakeven + offset
+            if self._side == "long":
+                new_stop = self._entry_price + self._breakeven_offset
+            else:
+                new_stop = self._entry_price - self._breakeven_offset
+
+            self.update_stop(new_stop, force=True)
+
+            logger.info(
+                "tick_stop_monitor.PARTIAL_TAKEN",
+                side=self._side,
+                entry=self._entry_price,
+                target=self._partial_target,
+                price=price,
+                quantity=self._partial_quantity,
+                new_stop=new_stop,
+            )
+            self.persist_to_disk()
+
+        except Exception as e:
+            logger.error(
+                "tick_stop_monitor.partial_failed",
+                error=str(e),
+                price=price,
+                side=self._side,
+            )
 
     # ── Trailing Stop Logic ────────────────────────────────────────────────
 
@@ -541,6 +629,10 @@ class TickStopMonitor:
             "mid_tightened_distance": self._mid_tightened_distance,
             "tighten_at_profit": self._tighten_at_profit,
             "tightened_distance": self._tightened_distance,
+            "partial_taken": self._partial_taken,
+            "partial_target": self._partial_target,
+            "partial_quantity": self._partial_quantity,
+            "breakeven_offset": self._breakeven_offset,
         }
 
     def load_state(self, data: dict) -> None:
@@ -563,6 +655,10 @@ class TickStopMonitor:
         self._mid_tightened_distance = data.get("mid_tightened_distance", self._mid_tightened_distance)
         self._tighten_at_profit = data.get("tighten_at_profit", self._tighten_at_profit)
         self._tightened_distance = data.get("tightened_distance", self._tightened_distance)
+        self._partial_taken = data.get("partial_taken", False)
+        self._partial_target = data.get("partial_target", 0.0)
+        self._partial_quantity = data.get("partial_quantity", 1)
+        self._breakeven_offset = data.get("breakeven_offset", 1.0)
         self._triggered = False
         self._trigger_reason = ""
         self._activation_time = time.monotonic()

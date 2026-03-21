@@ -144,6 +144,8 @@ class TradingOrchestrator:
         confluence_engine: Optional[ConfluenceEngine] = None,
         order_flow_engine: Optional[OrderFlowEngine] = None,
         risk_manager: Optional[RiskManager] = None,
+        # ── Daily maintenance callbacks ──────────────────────────────────────
+        contract_roll_fn: Optional[Callable[[], Coroutine]] = None,
     ) -> None:
         self._config = config
         self._bus = event_bus
@@ -186,6 +188,9 @@ class TradingOrchestrator:
         self._risk_manager = risk_manager
         self._use_confluence = (confluence_engine is not None and risk_manager is not None)
 
+        # ── Daily maintenance callbacks ──────────────────────────────────────
+        self._contract_roll_fn = contract_roll_fn
+
         # ── Pre-market context (set by set_pre_market_context) ────────────
         self._pre_market_context = None
 
@@ -219,9 +224,9 @@ class TradingOrchestrator:
         self._thesis_results: list[dict] = []  # completed thesis outcomes
         self._consecutive_errors: int = 0
 
-        # ── Post-stopout cooldown ────────────────────────────────────────
-        # After any stop-out, enforce a 3-minute cooldown before re-entry.
-        # This prevents revenge trading (the #1 cause of blowing up).
+        # ── Post-exit cooldown ─────────────────────────────────────────
+        # After any exit: 2-minute cooldown (win), 5-minute cooldown (loss).
+        # Prevents re-entering the same chop that caused a stop-out.
         self._last_exit_time: float = 0.0  # monotonic time of last exit
         self._last_exit_side: Optional[Side] = None  # direction of last exited trade
         self._last_exit_was_loss: bool = False  # was the last exit a loss?
@@ -855,11 +860,31 @@ class TradingOrchestrator:
         conf_proxy = min(0.50 + (best_score - session_params.min_confluence) * 0.10, 0.85)
 
         entry_side = Side.LONG if best_side == "long" else Side.SHORT
-        sl_pts = self._risk_manager.get_sl_points(phase)
+
+        # Dynamic stop: use OB zone or HTF structure zone + ATR buffer
+        ob_zone = best_result.get("ob_zone")
+        structure_zone = best_result.get("structure_zone")
+        sl_pts = self._risk_manager.compute_dynamic_stop(
+            side=best_side,
+            entry_price=state.last_price,
+            ob_zone=ob_zone,
+            atr=state.atr,
+            phase=phase,
+            structure_zone=structure_zone,
+        )
+        logger.info(
+            "confluence.dynamic_stop",
+            side=best_side,
+            dynamic_sl=sl_pts,
+            ob_zone=ob_zone is not None,
+            structure_zone=structure_zone is not None,
+            atr=state.atr,
+            phase=phase.value,
+        )
 
         # Apply pre-market context adjustments: widen stops on volatile days
         if self._pre_market_context and getattr(self._pre_market_context, "widen_stops", False):
-            sl_pts = sl_pts * 1.25  # 25% wider stops (e.g., 40pt → 50pt)
+            sl_pts = sl_pts * 1.25  # 25% wider stops (e.g., 17pt → 21pt)
             logger.info("confluence.widen_stops_applied", original_sl=sl_pts / 1.25, widened_sl=sl_pts)
 
         # factors values are dicts with {"score": int, "detail": str}
@@ -879,10 +904,51 @@ class TradingOrchestrator:
             phase=phase.value,
         )
 
+        # Confluence-based position sizing: better signal = bigger bet
+        # Score 3 (min) → 3 contracts, Score 4 → 4, Score 5+ → max (5)
+        max_entry = self._config.trading.max_entry_contracts  # default 5
+        if best_score >= 5:
+            base_quantity = max_entry              # everything aligns — full size
+        elif best_score >= 4:
+            base_quantity = max(3, max_entry - 1)  # solid setup
+        else:
+            base_quantity = 3                      # minimum confluence — base size
+
+        entry_quantity = base_quantity
+
+        # Pre-market reduce_size: halve
+        if self._pre_market_context and getattr(self._pre_market_context, "reduce_size", False):
+            entry_quantity = max(1, entry_quantity // 2)
+
+        # FAST market: logged for awareness, no size reduction.
+        # Strong directional moves with confluence = best setups.
+        if best_result.get("fast_market"):
+            logger.info("confluence.fast_market_detected", quantity=entry_quantity)
+
+        # Apex scaling check: cap by effective max micros if apex is active
+        if self._apex and hasattr(self._apex, 'account_state') and self._apex.account_state:
+            effective = self._apex.account_state.effective_max_micros
+            entry_quantity = min(entry_quantity, effective)
+
+        # Session controller cap (profit preservation tiers)
+        if self._session_ctrl:
+            entry_quantity = min(entry_quantity, self._session_ctrl.effective_max_contracts)
+
+        # Hard floor
+        entry_quantity = max(1, entry_quantity)
+
+        logger.info(
+            "confluence.position_size",
+            confluence_score=best_score,
+            base_quantity=base_quantity,
+            final_quantity=entry_quantity,
+            max_entry=max_entry,
+        )
+
         entry_action = LLMAction(
             action=ActionType.ENTER,
             side=entry_side,
-            quantity=(1 if self._pre_market_context and getattr(self._pre_market_context, "reduce_size", False) else 2),
+            quantity=entry_quantity,
             stop_distance=sl_pts,
             reasoning=f"Confluence {best_score}/6 [{factors_str}] passed all risk gates. LLM bypassed (no DOM/OB data).",
             confidence=conf_proxy,
@@ -951,6 +1017,17 @@ class TradingOrchestrator:
                     else:
                         tp_price = 0.0
 
+                    # Build partial close callback
+                    partial_fn = None
+                    partial_target = trading_cfg.eth_partial_profit_points if is_eth else trading_cfg.partial_profit_points
+                    if isinstance(self._order_manager, QuantLynkOrderManager):
+                        async def _partial_close_fn(side: str, quantity: int, price: float) -> None:
+                            await self._order_manager._client.partial_close(side=side, quantity=quantity, price=price)
+                        partial_fn = _partial_close_fn
+
+                    # Dynamic partial quantity: half of entry size, min 1
+                    partial_qty = max(1, action.quantity // 2) if action.quantity else 1
+
                     self._tick_stop_monitor.activate(
                         side=new_position.side.value,
                         entry_price=fill_price,
@@ -964,6 +1041,10 @@ class TradingOrchestrator:
                         eth_mid_tightened_distance=trading_cfg.eth_mid_tightened_distance,
                         eth_tighten_at_profit=trading_cfg.eth_tighten_at_profit,
                         eth_tightened_distance=trading_cfg.eth_tightened_distance,
+                        partial_target_points=partial_target,
+                        partial_fn=partial_fn,
+                        partial_quantity=partial_qty,
+                        breakeven_offset=trading_cfg.partial_breakeven_offset,
                     )
                     logger.info(
                         "confluence.tick_stop_activated",
@@ -972,6 +1053,7 @@ class TradingOrchestrator:
                         stop=stop_price,
                         take_profit=tp_price,
                         atr=current_atr,
+                        partial_target=partial_target,
                     )
 
             # Full post-exit bookkeeping on flatten (mirrors legacy path)
@@ -1357,12 +1439,15 @@ class TradingOrchestrator:
                     )
                 return
 
-        # 2a2. UNIVERSAL cooldown — 5 MINUTES after ANY exit (win or loss).
-        # Winning traders wait between trades. The LLM re-enters 30 seconds
-        # after a win and gives the profit right back. After a LOSS, wait 8
-        # minutes (extra penalty to prevent revenge trading).
+        # 2a2. UNIVERSAL cooldown — 2 MINUTES after a win, 5 MINUTES after a loss.
+        # Entries are mechanical (confluence engine, not LLM), so the old
+        # 5/8 minute cooldowns designed for LLM re-entry protection were
+        # too long. But a short cooldown after loss is still valuable: the
+        # market condition that caused the stop-out (whipsaw, sweep) may
+        # still be playing out. 2 min after win lets the system catch the
+        # next setup; 5 min after loss avoids re-entering the same chop.
         if position is None and self._last_exit_time > 0:
-            cooldown_sec = 480 if self._last_exit_was_loss else 300  # 8min loss, 5min win
+            cooldown_sec = 300 if self._last_exit_was_loss else 120  # 5min loss, 2min win
             elapsed = time.monotonic() - self._last_exit_time
             if elapsed < cooldown_sec:
                 remaining = int(cooldown_sec - elapsed)
@@ -1582,7 +1667,7 @@ class TradingOrchestrator:
         # - 4 contracts × 10pt stop = $80 risk per trade (too much on marginal setups)
         # The guardrails handle max POSITION size; this handles max ENTRY size.
         if action.action == ActionType.ENTER and action.quantity is not None:
-            max_entry = 2  # hard cap: never enter more than 2 contracts at once
+            max_entry = self._config.trading.max_entry_contracts
             if action.quantity > max_entry:
                 logger.info(
                     "orchestrator.entry_size_capped",
@@ -1672,51 +1757,35 @@ class TradingOrchestrator:
                     )
                     return
 
-        # 4d2. RSI extreme guard — block COUNTER-TREND entries at RSI extremes.
-        # Key insight: RSI < 30 is NORMAL during strong downtrends. Blocking shorts
-        # at RSI < 30 prevented the system from trading the biggest down moves.
-        # Now: only block entries that go AGAINST the trend at RSI extremes.
-        # - RSI > 70 + LONG = blocked (buying overbought — likely to reverse)
-        # - RSI < 30 + SHORT + bearish EMAs = ALLOWED (trend-following into selloff)
-        # - RSI < 30 + SHORT + mixed/bullish EMAs = blocked (fading at oversold)
+        # 4d2. RSI extreme guard — REMOVED.
+        # RSI is a mean-reversion indicator used in a momentum/trend system.
+        # When MNQ trends strongly, RSI > 70 or < 30 for extended periods.
+        # Blocking entries at RSI extremes prevented entries during the
+        # strongest trending moves — exactly when the system SHOULD be trading.
+        # The EMA trend filter, direction-aware volume, and structure factor
+        # already handle trend-vs-counter-trend filtering far more accurately.
+        # Additionally, the trade_quality.py guardrail had an inconsistency:
+        # the orchestrator allowed shorts at RSI < 30 with bearish EMAs,
+        # but trade_quality blocked them unconditionally — a dead-code bug.
+        # RSI is still available in state.rsi for logging/analysis.
         if action.action == ActionType.ENTER and action.side is not None:
             rsi = state.rsi
             if rsi is not None and rsi > 0:
-                if action.side == Side.LONG and rsi > 70:
-                    logger.warning(
-                        "orchestrator.rsi_guard_blocked",
-                        side="long",
+                if (action.side == Side.LONG and rsi > 70) or (action.side == Side.SHORT and rsi < 30):
+                    logger.info(
+                        "orchestrator.rsi_extreme_info",
+                        side=action.side.value,
                         rsi=round(rsi, 1),
-                        msg="BLOCKED: Cannot enter long when RSI > 70 (overbought)",
+                        msg=f"RSI at {round(rsi, 1)} — logged for analysis, no block applied",
                     )
-                    return
-                if action.side == Side.SHORT and rsi < 30:
-                    # Check if EMAs are bearish — if so, allow the short
-                    emas = state.emas
-                    ema_align = emas.get("alignment", "mixed")
-                    if ema_align in ("bearish", "bearish_partial"):
-                        logger.info(
-                            "orchestrator.rsi_oversold_trend_allowed",
-                            side="short",
-                            rsi=round(rsi, 1),
-                            ema_alignment=ema_align,
-                            msg="RSI oversold but EMAs bearish — trend-following short ALLOWED",
-                        )
-                        # Don't block — allow the trade
-                    else:
-                        logger.warning(
-                            "orchestrator.rsi_guard_blocked",
-                            side="short",
-                            rsi=round(rsi, 1),
-                            ema_alignment=ema_align,
-                            msg="BLOCKED: Cannot enter short when RSI < 30 and EMAs not bearish",
-                        )
-                        return
 
-        # 4d3. VWAP extension guard — block entries >15pts from VWAP.
+        # 4d3. VWAP extension guard — block entries >25pts from VWAP.
         # Entering far from VWAP = chasing. Price reverts to VWAP, and you
         # get stopped. Exception: strong trend (all EMAs aligned + structure confirms)
-        # allows up to 20pts extension for trend continuation entries.
+        # allows up to 35pts extension for trend continuation entries.
+        # Thresholds widened from 15/20 to 25/35 to match MNQ volatility —
+        # MNQ regularly trades 20-30pts from VWAP on normal trending days.
+        # The old 15pt threshold blocked entries during the strongest moves.
         if action.action == ActionType.ENTER and action.side is not None:
             vwap = state.levels.vwap
             if vwap > 0:
@@ -1736,7 +1805,7 @@ class TradingOrchestrator:
                     and struct_pattern == "LH_LL"
                     and action.side == Side.SHORT
                 )
-                max_vwap_dist = 20.0 if (strong_trend_long or strong_trend_short) else 15.0
+                max_vwap_dist = 35.0 if (strong_trend_long or strong_trend_short) else 25.0
 
                 if vwap_dist > max_vwap_dist:
                     logger.warning(
@@ -1791,9 +1860,11 @@ class TradingOrchestrator:
                 except Exception:
                     pass  # Don't block on bar parsing errors
 
-        # 4d5. Trades-per-hour limiter — max 2 entries per clock hour.
-        # Overtrading is the #1 cause of losses. Professional traders take
-        # 3-5 trades per DAY, not per hour.
+        # 4d5. Trades-per-hour limiter — max 3 entries per clock hour.
+        # Prevents revenge trading after quick losses. 3/hr allows legitimate
+        # burst setups (e.g., London open) while stopping overtrading.
+        # Other guards (8 daily max, same-direction block, post-loss confidence)
+        # provide additional pacing.
         if action.action == ActionType.ENTER:
             import datetime as _dt
             now_et = _dt.datetime.now(ZoneInfo("US/Eastern"))
@@ -1801,12 +1872,12 @@ class TradingOrchestrator:
             if current_hour != self._current_hour:
                 self._current_hour = current_hour
                 self._trades_this_hour = 0
-            if self._trades_this_hour >= 2:
+            if self._trades_this_hour >= 3:
                 logger.warning(
                     "orchestrator.hourly_trade_limit",
                     trades_this_hour=self._trades_this_hour,
                     hour=current_hour,
-                    msg=f"BLOCKED: Already {self._trades_this_hour} trades this hour (max 2/hour)",
+                    msg=f"BLOCKED: Already {self._trades_this_hour} trades this hour (max 3/hour)",
                 )
                 return
 
@@ -2075,6 +2146,17 @@ class TradingOrchestrator:
                         is_eth = clock.is_eth(current_phase)
                         trading_cfg = self._config.trading
 
+                        # Build partial close callback
+                        partial_fn2 = None
+                        partial_target2 = trading_cfg.eth_partial_profit_points if is_eth else trading_cfg.partial_profit_points
+                        if isinstance(self._order_manager, QuantLynkOrderManager):
+                            async def _partial_close_fn2(side: str, quantity: int, price: float) -> None:
+                                await self._order_manager._client.partial_close(side=side, quantity=quantity, price=price)
+                            partial_fn2 = _partial_close_fn2
+
+                        # Dynamic partial quantity: half of entry size, min 1
+                        partial_qty2 = max(1, action.quantity // 2) if action.quantity else 1
+
                         self._tick_stop_monitor.activate(
                             side=new_position.side.value,
                             entry_price=fill_price,
@@ -2088,6 +2170,10 @@ class TradingOrchestrator:
                             eth_mid_tightened_distance=trading_cfg.eth_mid_tightened_distance,
                             eth_tighten_at_profit=trading_cfg.eth_tighten_at_profit,
                             eth_tightened_distance=trading_cfg.eth_tightened_distance,
+                            partial_target_points=partial_target2,
+                            partial_fn=partial_fn2,
+                            partial_quantity=partial_qty2,
+                            breakeven_offset=trading_cfg.partial_breakeven_offset,
                         )
                         logger.info(
                             "orchestrator.tick_stop_monitor_activated",
@@ -2097,6 +2183,7 @@ class TradingOrchestrator:
                             stop=stop_price,
                             take_profit=tp_price,
                             is_eth=is_eth,
+                            partial_target=partial_target2,
                         )
                 elif action.action in (ActionType.FLATTEN, ActionType.STOP_TRADING):
                     self._tick_stop_monitor.deactivate()
@@ -2750,6 +2837,13 @@ class TradingOrchestrator:
                 )
             except Exception:
                 logger.debug("orchestrator.postmortem_log_failed", exc_info=True)
+
+        # 4b. Check for contract rollover (daily halt window maintenance)
+        if self._contract_roll_fn:
+            try:
+                await self._contract_roll_fn()
+            except Exception:
+                logger.debug("orchestrator.contract_roll_check_failed", exc_info=True)
 
         # 5. Flush data recorder
         if self._data_recorder:

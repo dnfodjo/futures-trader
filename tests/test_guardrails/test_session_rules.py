@@ -82,18 +82,21 @@ class TestConsecutiveLosers:
         )
         assert result.allowed is True
 
-    def test_blocks_at_max(self, guard):
+    def test_reduces_to_min_size_at_max(self, guard):
+        """4+ consecutive losers reduces to 1 contract (not blocked)."""
         result = guard.check(
             _action(ActionType.ENTER), _state(), consecutive_losers=4,
         )
-        assert result.allowed is False
-        assert "consecutive losers" in result.reason
+        assert result.allowed is True
+        assert result.modified_quantity == 1
 
-    def test_blocks_above_max(self, guard):
+    def test_reduces_to_min_size_above_max(self, guard):
+        """6 consecutive losers also reduces to 1 contract."""
         result = guard.check(
             _action(ActionType.ENTER), _state(), consecutive_losers=6,
         )
-        assert result.allowed is False
+        assert result.allowed is True
+        assert result.modified_quantity == 1
 
 
 # ── Session Phase Blocking ───────────────────────────────────────────────────

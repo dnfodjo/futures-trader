@@ -814,6 +814,32 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
                 ws_task = asyncio.create_task(ws.run(), name="tradovate_ws")
                 background_tasks.append(ws_task)
 
+        # ── Step 2b: Verify front-month contract via Databento ────────────────
+        # Also checked during daily halt (_contract_roll_fn in shutdown).
+        # At startup this is a no-op if the symbol already matches.
+        if not dry_run and config.databento.api_key:
+            try:
+                from src.data.databento_client import DatabentoClient as _DBC
+
+                front_month = _DBC.resolve_front_month(api_key=config.databento.api_key)
+                if front_month and front_month != config.trading.symbol:
+                    old_symbol = config.trading.symbol
+                    config.trading.symbol = front_month
+                    logger.info(
+                        "main.contract_auto_rolled",
+                        old_symbol=old_symbol,
+                        new_symbol=front_month,
+                        msg=f"Auto-rolled contract: {old_symbol} → {front_month}",
+                    )
+                elif front_month:
+                    logger.info("main.contract_symbol_confirmed", symbol=front_month)
+            except Exception:
+                logger.warning(
+                    "main.contract_resolve_error",
+                    exc_info=True,
+                    msg=f"Front-month resolution failed — using configured symbol {config.trading.symbol}",
+                )
+
         # ── Step 3: Connect to Databento (unless dry run) ────────────────────
         if not dry_run and components["databento_client"]:
             await _connect_databento(components, config)
@@ -929,6 +955,33 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
                 logger.exception("main.postmortem_failed")
                 return ""
 
+        # Build contract roll check callback for daily halt window
+        async def _contract_roll_fn() -> None:
+            """Check if front-month contract has changed during daily halt."""
+            if not config.databento.api_key:
+                return
+            try:
+                from src.data.databento_client import DatabentoClient as _DBC
+
+                front_month = _DBC.resolve_front_month(api_key=config.databento.api_key)
+                if not front_month:
+                    return
+                if front_month != config.trading.symbol:
+                    old_symbol = config.trading.symbol
+                    config.trading.symbol = front_month
+                    # Also update the live Databento client's subscription list
+                    db_client = components.get("databento_client")
+                    if db_client:
+                        db_client.update_symbol(front_month)
+                    logger.info(
+                        "main.contract_rolled_at_halt",
+                        old_symbol=old_symbol,
+                        new_symbol=front_month,
+                        msg=f"Contract rolled during halt: {old_symbol} → {front_month}",
+                    )
+            except Exception:
+                logger.debug("main.contract_roll_check_failed", exc_info=True)
+
         orchestrator = TradingOrchestrator(
             config=config,
             event_bus=event_bus,
@@ -965,6 +1018,7 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
                 state_engine.reload_persisted_bars(),
             ),
             session_stats_fn=state_engine.update_session_stats,
+            contract_roll_fn=_contract_roll_fn,
         )
 
         # Set pre-market context on orchestrator

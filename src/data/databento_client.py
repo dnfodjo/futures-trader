@@ -108,67 +108,86 @@ class DatabentoClient:
         """Register a callback for connection/data errors."""
         self._error_handlers.append(handler)
 
-    # ── Contract Rollover Check ────────────────────────────────────────────
+    # ── Contract Auto-Roll ───────────────────────────────────────────────
 
-    def check_contract_rollover(self) -> dict[str, Any] | None:
-        """Check if the configured contract is near expiration.
+    @staticmethod
+    def resolve_front_month(
+        api_key: str,
+        dataset: str = "GLBX.MDP3",
+    ) -> str | None:
+        """Resolve the current front-month MNQ contract via Databento symbology.
 
-        MNQ expires quarterly on the 3rd Friday:
-        H=March, M=June, U=September, Z=December.
+        Uses the continuous contract symbol ``MNQ.c.0`` (calendar-based front month)
+        which maps to whichever specific contract (e.g., MNQM6, MNQU6) the exchange
+        considers the active front month. This is the same logic Tradovate uses —
+        the roll happens when trading volume on the new contract surpasses the old.
 
-        Returns a dict with warning info, or None if not near expiration.
+        Returns:
+            The raw symbol string (e.g., "MNQM6") or None on error.
         """
-        symbol = self._trading_config.symbol  # e.g., "MNQM6"
-
-        # Parse month code and year digit from symbol
-        # Format: MNQ + month_code + year_digit (e.g., MNQM6 = June 2026)
-        if len(symbol) < 5:
-            return None
-
-        month_code = symbol[-2].upper()
-        year_digit = symbol[-1]
-
-        if month_code not in _EXPIRATION_MONTHS:
+        try:
+            import databento as db
+        except ImportError:
+            logger.error("databento.resolve_front_month_import_failed")
             return None
 
         try:
-            exp_month = _EXPIRATION_MONTHS[month_code]
-            # Year digit: assume 202X
-            exp_year = 2020 + int(year_digit)
+            client = db.Historical(key=api_key)
+            today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
-            # Find 3rd Friday of the expiration month
-            # Start from the 1st of the month and find the third Friday
-            first_day = datetime(exp_year, exp_month, 1, tzinfo=UTC)
-            # Find first Friday
-            days_until_friday = (4 - first_day.weekday()) % 7
-            first_friday = first_day + timedelta(days=days_until_friday)
-            third_friday = first_friday + timedelta(weeks=2)
+            resolution = client.symbology.resolve(
+                dataset=dataset,
+                symbols=["MNQ.c.0"],
+                stype_in="continuous",
+                stype_out="raw_symbol",
+                start_date=today,
+                end_date=today,
+            )
 
-            today = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-            days_until_expiry = (third_friday - today).days
+            # Result format: {"MNQ.c.0": [{"d0": "...", "d1": "...", "s": "MNQM6"}]}
+            mappings = resolution.result.get("MNQ.c.0", [])
+            if not mappings:
+                logger.warning("databento.resolve_front_month_empty")
+                return None
 
-            if days_until_expiry <= _ROLLOVER_WARNING_DAYS:
-                warning = {
-                    "symbol": symbol,
-                    "expiration_date": third_friday.strftime("%Y-%m-%d"),
-                    "days_until_expiry": days_until_expiry,
-                    "expired": days_until_expiry <= 0,
-                }
-                if days_until_expiry <= 0:
-                    logger.error(
-                        "databento.contract_expired",
-                        **warning,
-                    )
-                else:
-                    logger.warning(
-                        "databento.contract_expiring_soon",
-                        **warning,
-                    )
-                return warning
-        except (ValueError, IndexError):
-            logger.debug("databento.rollover_check_failed", symbol=symbol)
+            raw_symbol = mappings[0].get("s") if isinstance(mappings[0], dict) else None
+            if raw_symbol:
+                logger.info(
+                    "databento.front_month_resolved",
+                    raw_symbol=raw_symbol,
+                )
+            return raw_symbol
 
-        return None
+        except Exception:
+            logger.warning("databento.resolve_front_month_failed", exc_info=True)
+            return None
+
+    def update_symbol(self, new_symbol: str) -> bool:
+        """Hot-swap the trading symbol if the front-month contract changed.
+
+        Updates both the internal subscription list and the trading config.
+        Returns True if the symbol actually changed, False if already current.
+        """
+        old_symbol = self._trading_config.symbol
+        if new_symbol == old_symbol:
+            return False
+
+        logger.info(
+            "databento.contract_rolled",
+            old_symbol=old_symbol,
+            new_symbol=new_symbol,
+        )
+
+        # Update config (used by QuantLynk, position tracker, etc.)
+        self._trading_config.symbol = new_symbol
+
+        # Update subscription symbol list (old specific contract → new)
+        self._symbols = [
+            new_symbol if s == old_symbol else s
+            for s in self._symbols
+        ]
+
+        return True
 
     # ── Connection ────────────────────────────────────────────────────────
 
@@ -178,9 +197,6 @@ class DatabentoClient:
         This creates the subscription but does NOT start streaming.
         Call stream() to begin receiving data.
         """
-        # Check contract rollover before connecting
-        self.check_contract_rollover()
-
         if not self._config.api_key:
             raise DatabentoConnectionError("Databento API key not configured")
 

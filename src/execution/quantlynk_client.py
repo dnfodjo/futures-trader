@@ -107,6 +107,24 @@ class QuantLynkClient:
             price=price,
         )
 
+    async def partial_close(self, side: str, quantity: int, price: float) -> dict[str, Any]:
+        """Close a partial position (not flatten — directional close).
+
+        For long positions: sends a sell order to reduce quantity.
+        For short positions: sends a buy order to reduce quantity.
+
+        Args:
+            side: "long" or "short" — the current position side.
+            quantity: Number of contracts to close.
+            price: Current market price (for logging/payload).
+        """
+        action = "sell" if side.lower() == "long" else "buy"
+        return await self._send_signal(
+            action=action,
+            quantity=quantity,
+            price=price,
+        )
+
     # ── Core Webhook Sender ──────────────────────────────────────────────
 
     async def _send_signal(

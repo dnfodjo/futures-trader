@@ -1,7 +1,6 @@
 """Tests for configuration loading."""
 
 import os
-import warnings
 from unittest.mock import patch
 
 import pytest
@@ -10,7 +9,6 @@ from src.core.config import (
     AppConfig,
     TradingConfig,
     TradovateConfig,
-    _get_next_contract_symbol,
     load_config,
 )
 
@@ -55,42 +53,21 @@ class TestTradingConfig:
         assert cfg.max_weekly_loss == 800.0
         assert cfg.max_monthly_loss == 2000.0
 
+    def test_partial_profit_defaults(self):
+        cfg = TradingConfig()
+        assert cfg.partial_profit_points == 15.0
+        assert cfg.partial_quantity == 1
+        assert cfg.partial_breakeven_offset == 1.0
+        assert cfg.eth_partial_profit_points == 10.0
+
 
 class TestContractRollover:
-    def test_expired_contract_warns(self):
-        """Contract from the past should trigger a warning."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            TradingConfig(symbol="MNQH5")  # March 2025 — expired
-            assert len(w) == 1
-            assert "expired" in str(w[0].message).lower()
-
-    def test_current_contract_no_warning(self):
-        """A far-future contract shouldn't warn."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            TradingConfig(symbol="MNQZ9")  # Dec 2029 — far future
-            # Filter to only our warnings (not pydantic deprecation etc)
-            rollover_warnings = [x for x in w if "MNQ" in str(x.message)]
-            assert len(rollover_warnings) == 0
-
-    def test_get_next_contract_symbol(self):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        ET = ZoneInfo("US/Eastern")
-
-        # In January -> should get March (H)
-        jan = datetime(2026, 1, 15, tzinfo=ET)
-        assert _get_next_contract_symbol(jan) == "MNQH6"
-
-        # In April -> should get June (M)
-        apr = datetime(2026, 4, 15, tzinfo=ET)
-        assert _get_next_contract_symbol(apr) == "MNQM6"
-
-        # In December -> should get December (Z) same year
-        dec = datetime(2026, 12, 1, tzinfo=ET)
-        assert _get_next_contract_symbol(dec) == "MNQZ6"
+    def test_symbol_accepts_any_value(self):
+        """TradingConfig no longer validates contract rollover — accepts any symbol."""
+        # Old contracts, current contracts, far-future — all accepted without warning
+        for sym in ("MNQH5", "MNQM6", "MNQZ9", "ES"):
+            tc = TradingConfig(symbol=sym)
+            assert tc.symbol == sym
 
 
 class TestLoadConfig:

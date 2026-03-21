@@ -177,7 +177,7 @@ class GuardrailEngine:
         if not result.allowed:
             return self._record_block(result)
 
-        # 4. Trade quality (RSI, session extremes, EMA pullback)
+        # 4. Trade quality (session extremes, EMA pullback)
         result = self._trade_quality.check(
             action=action,
             state=state,

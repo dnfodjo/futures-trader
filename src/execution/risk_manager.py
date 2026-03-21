@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -107,19 +107,19 @@ class RiskManager:
     Responsibilities:
       - Enforce hard gates before every LLM decision call
       - Enforce mechanical exit conditions on every state update
-      - Track cooldown after losing trades
+      - Track loss timestamps for analysis
       - Provide session-specific risk parameters
+
+    Note: Post-loss cooldowns are handled by the orchestrator (2min win / 5min loss),
+    not by this class. record_loss() persists timestamps for analysis only.
     """
 
     def __init__(
         self,
         daily_loss_limit: float = 400.0,
-        cooldown_bars_5m: int = 3,          # 3 bars x 5 min = 15 minutes
         daily_target: float = 500.0,        # advisory threshold for LLM
     ) -> None:
         self._daily_loss_limit = daily_loss_limit
-        self._cooldown_bars = cooldown_bars_5m
-        self._cooldown_duration = timedelta(minutes=cooldown_bars_5m * 5)
         self._daily_target = daily_target
         self._last_loss_time: Optional[datetime] = None
         self._shutdown = False
@@ -130,7 +130,6 @@ class RiskManager:
         logger.info(
             "risk_manager.init",
             daily_loss_limit=daily_loss_limit,
-            cooldown_minutes=cooldown_bars_5m * 5,
             daily_target=daily_target,
         )
 
@@ -157,6 +156,69 @@ class RiskManager:
     def get_tp_points(self, phase: SessionPhase) -> float:
         """Get take-profit distance in points for the current session."""
         return self.get_session_params(phase).tp_points
+
+    def compute_dynamic_stop(
+        self,
+        side: str,
+        entry_price: float,
+        ob_zone: dict | None,
+        atr: float,
+        phase: SessionPhase,
+        structure_zone: dict | None = None,
+    ) -> float:
+        """Compute stop distance based on structural level + ATR buffer.
+
+        Priority order:
+          1. OB zone edge + 0.5x ATR buffer  (tightest — precise ICT zone)
+          2. HTF structure zone edge + 0.75x ATR buffer  (S/R zones get wicked more)
+          3. ATR x 3.0 fallback  (no structural anchor)
+
+        Always clamped between 8pts (min — noise floor) and the session
+        maximum (30/35/40 depending on phase).
+
+        Args:
+            side: "long" or "short" (case-insensitive).
+            entry_price: Entry price for the trade.
+            ob_zone: Dict with ob_zone_low, ob_zone_high, ob_side from
+                     confluence scoring.  None if no OB tap.
+            atr: Current 14-period ATR on 1-min bars.
+            phase: Current session phase for max stop lookup.
+            structure_zone: Dict with zone_low, zone_high, timeframe, level_type
+                           from HTF structure scoring.  None if no nearby level.
+
+        Returns:
+            Stop distance in points, rounded to 2 decimals.
+        """
+        session_params = self.get_session_params(phase)
+        max_sl = session_params.sl_points  # session hard cap
+        min_sl = 8.0  # never tighter than 8pts (32 ticks on MNQ)
+        side_lower = side.lower()
+
+        if ob_zone and atr > 0:
+            # Priority 1: OB zone edge + 0.5x ATR buffer
+            if side_lower == "long":
+                raw_distance = entry_price - ob_zone["ob_zone_low"] + (atr * 0.5)
+            else:
+                raw_distance = ob_zone["ob_zone_high"] - entry_price + (atr * 0.5)
+            dynamic_sl = max(min_sl, min(raw_distance, max_sl))
+
+        elif structure_zone and atr > 0:
+            # Priority 2: HTF structure zone edge + 0.75x ATR buffer
+            # Wider buffer because S/R zones get tested/wicked more than OBs
+            if side_lower == "long":
+                raw_distance = entry_price - structure_zone["zone_low"] + (atr * 0.75)
+            else:
+                raw_distance = structure_zone["zone_high"] - entry_price + (atr * 0.75)
+            dynamic_sl = max(min_sl, min(raw_distance, max_sl))
+
+        elif atr > 0:
+            # Priority 3: No structural anchor — ATR-based fallback
+            dynamic_sl = max(min_sl, min(atr * 3.0, max_sl))
+        else:
+            # No OB, no structure, no ATR — use session default
+            dynamic_sl = max_sl
+
+        return round(dynamic_sl, 2)
 
     # ------------------------------------------------------------------
     # Hard gates - checked BEFORE the LLM call
@@ -204,10 +266,7 @@ class RiskManager:
         if has_position:
             return False, "POSITION_EXISTS: must exit current position first"
 
-        # 5. Cooldown active after a loss
-        if self._is_cooldown_active():
-            remaining = self._cooldown_remaining()
-            return False, f"COOLDOWN: {remaining.total_seconds():.0f}s remaining after last loss"
+        # 5. (Cooldown removed — orchestrator handles post-exit cooldowns directly)
 
         # 5b. Max trades per session phase
         phase_key = phase.value
@@ -337,27 +396,18 @@ class RiskManager:
         self._persist_state()
 
     def record_loss(self, timestamp: datetime) -> None:
-        """Record a losing trade timestamp for cooldown tracking."""
+        """Record a losing trade timestamp for analysis.
+
+        Note: The risk manager no longer enforces a cooldown — the orchestrator
+        handles post-exit cooldowns directly (2min win / 5min loss). This method
+        persists the loss timestamp for post-session analysis and state tracking.
+        """
         self._last_loss_time = timestamp
         logger.info(
             "risk_manager.loss_recorded",
-            timestamp=timestamp.isoformat(),
-            cooldown_until=(timestamp + self._cooldown_duration).isoformat(),
+            loss_time=timestamp.isoformat(),
         )
         self._persist_state()
-
-    def _is_cooldown_active(self) -> bool:
-        if self._last_loss_time is None:
-            return False
-        now = datetime.now(UTC)
-        return now < self._last_loss_time + self._cooldown_duration
-
-    def _cooldown_remaining(self) -> timedelta:
-        if self._last_loss_time is None:
-            return timedelta(0)
-        end = self._last_loss_time + self._cooldown_duration
-        remaining = end - datetime.now(UTC)
-        return max(remaining, timedelta(0))
 
     # ------------------------------------------------------------------
     # Advisory helpers
@@ -397,7 +447,7 @@ class RiskManager:
     # ------------------------------------------------------------------
 
     def _persist_state(self) -> None:
-        """Save cooldown and trade count state to disk for crash recovery."""
+        """Save loss time and trade count state to disk for crash recovery."""
         try:
             _RISK_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
             data = {
@@ -429,20 +479,17 @@ class RiskManager:
                     today=today_et,
                 )
 
-            # Cooldown: always restore if still active (loss could be minutes ago)
+            # Restore last loss time for analysis (no cooldown enforced here —
+            # the orchestrator handles post-exit cooldowns directly).
             if data.get("last_loss_time"):
                 dt = datetime.fromisoformat(data["last_loss_time"])
-                # Ensure timezone-aware
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=UTC)
                 self._last_loss_time = dt
-                if not self._is_cooldown_active():
-                    self._last_loss_time = None
-                else:
-                    logger.info(
-                        "risk_manager.cooldown_restored",
-                        remaining=self._cooldown_remaining().total_seconds(),
-                    )
+                logger.info(
+                    "risk_manager.last_loss_restored",
+                    loss_time=dt.isoformat(),
+                )
 
             # Session trade counts and shutdown: only restore on same trading day
             if is_same_day:

@@ -29,6 +29,7 @@ Usage:
 
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -74,6 +75,7 @@ class OrderBlock:
     low: float  # lower boundary of the OB zone (full candle low)
     timestamp: str = ""
     mitigated: bool = False
+    created_at: float = 0.0  # epoch timestamp for time decay
 
     @property
     def mid(self) -> float:
@@ -97,6 +99,7 @@ class SweepLevel:
     level: float
     level_type: str  # "equal_highs", "equal_lows", "session_high", "session_low"
     swept: bool = False
+    swept_at: float = 0.0  # epoch timestamp of first sweep trigger
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +134,9 @@ class ConfluenceEngine:
         # Watermark for OB detection — avoid re-scanning entire bar history
         self._last_ob_scan_len: int = 0
 
+        # Track used session-level sweeps (reset on session change)
+        self._used_session_sweeps: set[str] = set()
+
         # HTF structure level manager (optional)
         self._structure_manager = structure_manager
 
@@ -152,6 +158,7 @@ class ConfluenceEngine:
 
         self._detect_order_blocks(bars_1m, atr)
         self._mitigate_order_blocks(bars_1m[-1])
+        self._prune_stale_order_blocks()
         self._update_pivots(bars_1m)
 
     def score(
@@ -183,6 +190,7 @@ class ConfluenceEngine:
         blocked = False
         block_reason = ""
         total_score = 0
+        fast_market = False
 
         # --- 1. Market Speed (filter) ---
         speed_state = self._calc_speed_state(bars_1m)
@@ -191,6 +199,7 @@ class ConfluenceEngine:
             block_reason = "Market speed too slow (speed_ratio < 0.5)"
         elif speed_state == "FAST":
             risk_flags.append("fast_market")
+            fast_market = True
 
         # --- 2. Trend ---
         trend_result = self._score_trend(side, last_price, multi_tf_emas)
@@ -243,6 +252,31 @@ class ConfluenceEngine:
                     msg=f"Structure +{structure_result['score']} suppressed (core={core_score} < 2)",
                 )
 
+        # --- FAST market: info flag only, no penalty ---
+        # Strong directional moves WITH confluence = best setups. Other filters
+        # (OB decay, direction-aware volume, sweep single-fire) already protect
+        # against news-spike false signals. No need to penalize FAST markets.
+
+        # --- Extract OB zone data for dynamic stop computation ---
+        ob_zone = None
+        if ob_result["score"] > 0:
+            ob_zone = {
+                "ob_zone_low": ob_result.get("ob_zone_low", 0),
+                "ob_zone_high": ob_result.get("ob_zone_high", 0),
+                "ob_side": ob_result.get("ob_side", ""),
+            }
+
+        # --- Extract HTF structure zone for dynamic stop (fallback when no OB) ---
+        structure_zone = None
+        nearest_level = structure_result.get("nearest_level")
+        if nearest_level is not None and structure_result["score"] > 0:
+            structure_zone = {
+                "zone_low": nearest_level.zone_low,
+                "zone_high": nearest_level.zone_high,
+                "timeframe": nearest_level.timeframe,
+                "level_type": nearest_level.level_type,
+            }
+
         result = {
             "score": total_score,
             "speed_state": speed_state,
@@ -250,6 +284,9 @@ class ConfluenceEngine:
             "block_reason": block_reason,
             "factors": factors,
             "risk_flags": risk_flags,
+            "fast_market": fast_market,
+            "ob_zone": ob_zone,
+            "structure_zone": structure_zone,
         }
 
         logger.info(
@@ -435,6 +472,7 @@ class ConfluenceEngine:
                                 high=ob_bar["high"],
                                 low=ob_bar["low"],
                                 timestamp=ob_bar.get("timestamp", ""),
+                                created_at=_time.time(),
                             )
                             self._add_ob(ob, atr)
 
@@ -455,6 +493,7 @@ class ConfluenceEngine:
                                 high=ob_bar["high"],
                                 low=ob_bar["low"],
                                 timestamp=ob_bar.get("timestamp", ""),
+                                created_at=_time.time(),
                             )
                             self._add_ob(ob, atr)
 
@@ -552,19 +591,44 @@ class ConfluenceEngine:
             ob for ob in self._bear_obs if not (bar_close > ob.high)
         ]
 
+    def _prune_stale_order_blocks(self) -> None:
+        """Remove OBs older than 120 minutes.  Legacy OBs (created_at==0) are kept."""
+        cutoff = _time.time() - 7200  # 120 minutes
+        self._bull_obs = [ob for ob in self._bull_obs if ob.created_at == 0 or ob.created_at > cutoff]
+        self._bear_obs = [ob for ob in self._bear_obs if ob.created_at == 0 or ob.created_at > cutoff]
+
     def _score_order_block(self, side: str, last_price: float) -> dict:
-        """Check if price taps an active OB zone.  2 points if yes."""
+        """Check if price taps an active OB zone.  Score decays with age.
+
+        Fresh OB (<=30 min or no timestamp): 2 points.
+        Aging OB (30-60 min): 1 point.
+        Stale OB (>60 min): skipped (0 points).
+        """
         side_lower = side.lower()
         obs = self._bull_obs if side_lower == "long" else self._bear_obs
 
         for ob in obs:
             if ob.low <= last_price <= ob.high:
+                # Time decay
+                age_minutes = (_time.time() - ob.created_at) / 60.0 if ob.created_at > 0 else 0.0
+
+                if age_minutes <= 30 or ob.created_at == 0:
+                    score = 2  # fresh OB or legacy OB without timestamp
+                elif age_minutes <= 60:
+                    score = 1  # aging OB -- half score
+                else:
+                    continue  # stale OB -- skip, look for fresher one
+
+                age_str = f" (age={age_minutes:.0f}min)" if ob.created_at > 0 else ""
                 return {
-                    "score": 2,
+                    "score": score,
                     "detail": (
                         f"{ob.side} OB tap at {ob.low:.2f}-{ob.high:.2f} "
-                        f"(price={last_price:.2f})"
+                        f"(price={last_price:.2f}){age_str}"
                     ),
+                    "ob_zone_low": ob.low,
+                    "ob_zone_high": ob.high,
+                    "ob_side": ob.side,
                 }
 
         return {"score": 0, "detail": "no OB tap"}
@@ -739,8 +803,9 @@ class ConfluenceEngine:
         For SHORT: a recent bar's HIGH spiked above a liquidity level, and
                    current price is back below it.
 
-        Uses previous bar history to verify actual price breach, not just
-        proximity.  Proximity window is 0.5 * ATR to handle fast moves.
+        Each sweep level fires only once.  It resets when price moves
+        > 1.5 * ATR away from the level (becomes relevant again).
+        Session-level sweeps are tracked separately via _used_session_sweeps.
         """
         if len(bars_1m) < 3:
             return {"score": 0, "detail": "insufficient bars for sweep check"}
@@ -748,50 +813,75 @@ class ConfluenceEngine:
         side_lower = side.lower()
         proximity = max(atr * 0.5, EQUAL_LEVEL_THRESHOLD) if atr > 0 else EQUAL_LEVEL_THRESHOLD
 
-        # Build combined liquidity levels from internal state + session levels
-        check_levels: list[tuple[float, str]] = []
-
-        for sl in self._sweep_levels:
-            check_levels.append((sl.level, sl.level_type))
-
-        # Add session levels as liquidity pools
-        for key in ["asian_high", "london_high", "ny_high"]:
-            val = session_levels.get(key, 0.0)
-            if val > 0:
-                check_levels.append((val, f"session_{key}"))
-        for key in ["asian_low", "london_low", "ny_low"]:
-            val = session_levels.get(key, 0.0)
-            if val > 0:
-                check_levels.append((val, f"session_{key}"))
+        # Reset swept flags for internal levels when price moved away
+        if atr > 0:
+            for sl in self._sweep_levels:
+                if sl.swept and abs(last_price - sl.level) > atr * 1.5:
+                    sl.swept = False
 
         # Check last 3 CLOSED bars for sweep evidence (exclude current/live bar
         # to prevent self-fulfilling signals where touching = sweep + reversal)
         recent_bars = bars_1m[-4:-1] if len(bars_1m) >= 4 else bars_1m[:-1]
 
+        # --- Check internal sweep levels (equal highs/lows) ---
         if side_lower == "long":
-            for level, ltype in check_levels:
-                if ltype in ("equal_lows", "session_asian_low", "session_london_low", "session_ny_low"):
-                    # Verify: a recent bar's LOW went BELOW the level
-                    swept = any(b["low"] < level for b in recent_bars)
-                    # And current price is back ABOVE the level (reversal)
-                    reversed_above = last_price > level and last_price - level <= proximity
-                    if swept and reversed_above:
-                        return {
-                            "score": 1,
-                            "detail": f"sweep of {ltype} at {level:.2f}",
-                        }
+            for sl in self._sweep_levels:
+                if sl.swept:
+                    continue  # already used this sweep
+                if sl.level_type != "equal_lows":
+                    continue
+                swept = any(b["low"] < sl.level for b in recent_bars)
+                reversed_above = last_price > sl.level and last_price - sl.level <= proximity
+                if swept and reversed_above:
+                    sl.swept = True
+                    sl.swept_at = _time.time()
+                    return {
+                        "score": 1,
+                        "detail": f"sweep of {sl.level_type} at {sl.level:.2f} (first touch)",
+                    }
         else:  # short
-            for level, ltype in check_levels:
-                if ltype in ("equal_highs", "session_asian_high", "session_london_high", "session_ny_high"):
-                    # Verify: a recent bar's HIGH went ABOVE the level
-                    swept = any(b["high"] > level for b in recent_bars)
-                    # And current price is back BELOW the level (reversal)
-                    reversed_below = last_price < level and level - last_price <= proximity
-                    if swept and reversed_below:
-                        return {
-                            "score": 1,
-                            "detail": f"sweep of {ltype} at {level:.2f}",
-                        }
+            for sl in self._sweep_levels:
+                if sl.swept:
+                    continue
+                if sl.level_type != "equal_highs":
+                    continue
+                swept = any(b["high"] > sl.level for b in recent_bars)
+                reversed_below = last_price < sl.level and sl.level - last_price <= proximity
+                if swept and reversed_below:
+                    sl.swept = True
+                    sl.swept_at = _time.time()
+                    return {
+                        "score": 1,
+                        "detail": f"sweep of {sl.level_type} at {sl.level:.2f} (first touch)",
+                    }
+
+        # --- Check session levels (tracked via _used_session_sweeps set) ---
+        session_check_keys = (
+            ["asian_low", "london_low", "ny_low"]
+            if side_lower == "long"
+            else ["asian_high", "london_high", "ny_high"]
+        )
+        for key in session_check_keys:
+            val = session_levels.get(key, 0.0)
+            if val <= 0:
+                continue
+            session_key = f"session_{key}"
+            if session_key in self._used_session_sweeps:
+                continue  # already used this session sweep
+
+            if side_lower == "long":
+                swept = any(b["low"] < val for b in recent_bars)
+                reversed_ok = last_price > val and last_price - val <= proximity
+            else:
+                swept = any(b["high"] > val for b in recent_bars)
+                reversed_ok = last_price < val and val - last_price <= proximity
+
+            if swept and reversed_ok:
+                self._used_session_sweeps.add(session_key)
+                return {
+                    "score": 1,
+                    "detail": f"sweep of {session_key} at {val:.2f} (first touch)",
+                }
 
         return {"score": 0, "detail": "no liquidity sweep detected"}
 
@@ -803,9 +893,11 @@ class ConfluenceEngine:
     def _score_volume(side: str, bars_1m: list[dict]) -> dict:
         """Check if current bar volume is above 1.5x 20-bar SMA.
 
-        Volume spike alone is sufficient for 1 point.  Directional
-        confirmation (buy_vol vs sell_vol) is logged as detail but not
-        required — during stop runs, the aggressor side is often opposite
+        Volume spike is required first.  Then directional confirmation
+        is checked: if buy/sell volume data is available and the dominant
+        side opposes the trade direction, the point is rejected.  This
+        prevents high sell-volume from scoring for a long signal.  When
+        buy/sell data is unavailable (both zero), direction check is
         to the entry direction as stops are hit.
         """
         if len(bars_1m) < VOLUME_SMA_PERIOD + 1:
@@ -827,7 +919,20 @@ class ConfluenceEngine:
         is_spike = volume_ratio >= VOLUME_SPIKE_MULT
 
         if is_spike:
-            # Directional info logged for LLM context, not gating
+            # Direction check: buy_volume vs sell_volume
+            total_dir = buy_vol + sell_vol
+            if total_dir > 0:
+                if side.lower() == "long" and sell_vol > buy_vol:
+                    return {
+                        "score": 0,
+                        "detail": f"volume spike but sell-dominated ({sell_vol}>{buy_vol})",
+                    }
+                if side.lower() == "short" and buy_vol > sell_vol:
+                    return {
+                        "score": 0,
+                        "detail": f"volume spike but buy-dominated ({buy_vol}>{sell_vol})",
+                    }
+
             dir_info = ""
             if buy_vol > 0 or sell_vol > 0:
                 dir_info = f", buy={buy_vol} sell={sell_vol}"
@@ -890,6 +995,7 @@ class ConfluenceEngine:
             "detail": ", ".join(details) if details else "no HTF structure",
             "blocked": result.get("blocked", False),
             "block_reason": result.get("block_reason", ""),
+            "nearest_level": level,  # forward for dynamic stop computation
         }
 
     # ------------------------------------------------------------------
@@ -918,5 +1024,6 @@ class ConfluenceEngine:
         self._swing_highs.clear()
         self._swing_lows.clear()
         self._sweep_levels.clear()
+        self._used_session_sweeps.clear()
         self._last_ob_scan_len = 0
         logger.info("confluence_engine_reset")

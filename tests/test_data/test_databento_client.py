@@ -347,43 +347,76 @@ class TestSymbolResolution:
         assert client._resolve_symbol(record) == "unknown"
 
 
-class TestContractRollover:
-    def test_rollover_warning_near_expiry(self, db_config, trading_config):
-        """Should warn when contract is near expiration."""
-        # MNQM6 = June 2026 contract, 3rd Friday of June
+class TestResolveFrontMonth:
+    """Tests for resolve_front_month() and update_symbol()."""
+
+    @patch("src.data.databento_client.db", create=True)
+    def test_resolve_front_month_success(self, mock_db):
+        """Should resolve MNQ.c.0 to raw symbol via Databento symbology."""
+        mock_client = MagicMock()
+        mock_db.Historical.return_value = mock_client
+        mock_resolution = MagicMock()
+        mock_resolution.result = {"MNQ.c.0": [{"s": "MNQU6"}]}
+        mock_client.symbology.resolve.return_value = mock_resolution
+
+        with patch.dict("sys.modules", {"databento": mock_db}):
+            result = DatabentoClient.resolve_front_month(api_key="test-key")
+
+        assert result == "MNQU6"
+        mock_client.symbology.resolve.assert_called_once()
+
+    @patch("src.data.databento_client.db", create=True)
+    def test_resolve_front_month_no_mappings(self, mock_db):
+        """Should return None when no mappings found."""
+        mock_client = MagicMock()
+        mock_db.Historical.return_value = mock_client
+        mock_resolution = MagicMock()
+        mock_resolution.result = {"MNQ.c.0": []}
+        mock_client.symbology.resolve.return_value = mock_resolution
+
+        with patch.dict("sys.modules", {"databento": mock_db}):
+            result = DatabentoClient.resolve_front_month(api_key="test-key")
+
+        assert result is None
+
+    @patch("src.data.databento_client.db", create=True)
+    def test_resolve_front_month_api_failure(self, mock_db):
+        """Should return None on API error."""
+        mock_client = MagicMock()
+        mock_db.Historical.return_value = mock_client
+        mock_client.symbology.resolve.side_effect = Exception("API down")
+
+        with patch.dict("sys.modules", {"databento": mock_db}):
+            result = DatabentoClient.resolve_front_month(api_key="test-key")
+
+        assert result is None
+
+    def test_resolve_front_month_no_databento(self):
+        """Should return None if databento module not installed."""
+        with patch.dict("sys.modules", {"databento": None}):
+            result = DatabentoClient.resolve_front_month(api_key="test-key")
+        assert result is None
+
+    def test_update_symbol_changes_config(self, db_config, trading_config):
+        """Should update trading config and subscription list."""
         trading_config.symbol = "MNQM6"
         client = DatabentoClient(db_config, trading_config)
+        # Ensure the old symbol is in the subscription list
+        assert "MNQM6" in client._symbols
 
-        # We can't fully control "today" in this test without mocking datetime,
-        # so we test the method exists and parses correctly
-        result = client.check_contract_rollover()
-        # Result depends on current date relative to June 2026 3rd Friday
-        # Just verify it returns a dict or None and doesn't crash
-        assert result is None or isinstance(result, dict)
+        changed = client.update_symbol("MNQU6")
+        assert changed is True
+        assert trading_config.symbol == "MNQU6"
+        assert "MNQU6" in client._symbols
+        assert "MNQM6" not in client._symbols
 
-    def test_rollover_expired_contract(self, db_config):
-        """Should return expired info for past contract."""
-        # MNQH5 = March 2025, already expired
-        config = TradingConfig(symbol="MNQH5")
-        client = DatabentoClient(db_config, config)
-        result = client.check_contract_rollover()
-        assert result is not None
-        assert result["expired"] is True
-
-    def test_rollover_far_out_contract(self, db_config):
-        """Should return None for far-future contract."""
-        # MNQZ9 = December 2029, far out
-        config = TradingConfig(symbol="MNQZ9")
-        client = DatabentoClient(db_config, config)
-        result = client.check_contract_rollover()
-        assert result is None
-
-    def test_rollover_invalid_symbol(self, db_config):
-        """Should handle symbols that don't match MNQ pattern."""
-        config = TradingConfig(symbol="ES")
-        client = DatabentoClient(db_config, config)
-        result = client.check_contract_rollover()
-        assert result is None
+    def test_update_symbol_same_symbol_no_change(self, db_config, trading_config):
+        """Should return False when symbol hasn't changed."""
+        trading_config.symbol = "MNQM6"
+        client = DatabentoClient(db_config, trading_config)
+        changed = client.update_symbol("MNQM6")
+        assert changed is False
+        assert trading_config.symbol == "MNQM6"
 
 
 class TestConfigurableThreshold:
