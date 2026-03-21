@@ -585,12 +585,23 @@ class DatabentoClient:
 
         # Other record types (SystemMsg, ErrorMsg, etc.) are logged but not dispatched
 
+    # Databento INT64_MAX / 1e9 sentinel — means "no price"
+    _SENTINEL_PRICE = 9_223_372_036.854776
+
+    # MNQ valid price range (reject anything outside this)
+    _MNQ_PRICE_MIN = 5_000.0
+    _MNQ_PRICE_MAX = 50_000.0
+
     def _parse_trade(self, record: Any) -> dict[str, Any] | None:
         """Parse a Databento TradeMsg into our internal dict format."""
         try:
             # Databento prices are in fixed-point (1e-9 precision)
             price = record.price / 1e9 if record.price > 1e6 else record.price
             size = record.size
+
+            # ── Reject sentinel / garbage prices ──────────────────────
+            if price <= 0 or price >= self._SENTINEL_PRICE:
+                return None  # INT64_MAX sentinel or zero — not a real trade
 
             # Classify trade direction using side field
             # Databento side: 'A' = ask (buyer initiated), 'B' = bid (seller initiated)
@@ -604,6 +615,24 @@ class DatabentoClient:
 
             # Get symbol from instrument_id mapping or raw symbol
             symbol = self._resolve_symbol(record, price=price)
+
+            # ── Only process trades for our trading symbol ────────────
+            # Reject ES and other instruments — we only trade MNQ
+            trading_sym = self._trading_config.symbol  # e.g. "MNQM6"
+            if symbol and not symbol.startswith(trading_sym[:3]):
+                # Not our instrument (e.g. ES trade) — skip
+                return None
+
+            # ── Validate price is in MNQ range ────────────────────────
+            if not (self._MNQ_PRICE_MIN <= price <= self._MNQ_PRICE_MAX):
+                logger.debug(
+                    "databento.trade_price_out_of_range",
+                    price=price,
+                    symbol=symbol,
+                    min=self._MNQ_PRICE_MIN,
+                    max=self._MNQ_PRICE_MAX,
+                )
+                return None
 
             # Timestamp from Databento (nanosecond Unix timestamp)
             ts = self._parse_timestamp(record)
@@ -644,7 +673,19 @@ class DatabentoClient:
                 if ask_price > 1e6:
                     ask_price /= 1e9
 
+            # Reject sentinel / garbage prices
+            if bid_price >= self._SENTINEL_PRICE or ask_price >= self._SENTINEL_PRICE:
+                return None
+            if not (self._MNQ_PRICE_MIN <= bid_price <= self._MNQ_PRICE_MAX):
+                return None
+
             symbol = self._resolve_symbol(record, price=bid_price)
+
+            # Only process quotes for our trading symbol
+            trading_sym = self._trading_config.symbol
+            if symbol and not symbol.startswith(trading_sym[:3]):
+                return None
+
             ts = self._parse_timestamp(record)
 
             return {
@@ -923,6 +964,13 @@ class DatabentoClient:
             if record_type == "TradeMsg":
                 price = record.price / 1e9 if record.price > 1e6 else record.price
                 size = record.size
+
+                # Skip sentinel / out-of-range prices
+                if price <= 0 or price >= DatabentoClient._SENTINEL_PRICE:
+                    continue
+                if not (DatabentoClient._MNQ_PRICE_MIN <= price <= DatabentoClient._MNQ_PRICE_MAX):
+                    continue
+
                 side = getattr(record, "side", None)
                 if side == "A" or side == ord("A"):
                     direction = "buy"
