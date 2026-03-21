@@ -191,12 +191,15 @@ class DatabentoClient:
         """Pick the MNQ contract with the highest daily volume.
 
         Fetches ``ohlcv-1d`` bars for all active MNQ contracts via the
-        ``MNQ.FUT`` parent symbol.  Tries progressively older dates
-        until data is available (historical API has a processing delay).
+        ``MNQ.FUT`` parent symbol.  Uses the ``DBNStore.symbology``
+        mappings to resolve instrument_ids back to raw symbols, then
+        picks the outright contract with the most volume — same logic
+        Tradovate uses to determine front month.
         """
         import re
 
-        mnq_pattern = re.compile(r"^MNQ[HMUZ]\d$")
+        # Outright contracts only: MNQH6, MNQM6, etc. — NOT spreads (MNQH6-MNQM6)
+        outright_pattern = re.compile(r"^MNQ[HMUZ]\d$")
 
         for days_back in (1, 2, 3, 5):
             target = today - timedelta(days=days_back)
@@ -212,13 +215,28 @@ class DatabentoClient:
                     end=end,
                 )
 
-                # Aggregate volume per raw_symbol
+                # Build instrument_id → raw_symbol mapping from symbology
+                # OHLCV records only have instrument_id, not raw_symbol
+                id_to_symbol: dict[str, str] = {}
+                symbology = getattr(data, "symbology", None)
+                if symbology and isinstance(symbology, dict):
+                    for sym, mappings in symbology.get("mappings", {}).items():
+                        if outright_pattern.match(sym):
+                            for m in mappings:
+                                iid = m.get("symbol", "")
+                                if iid:
+                                    id_to_symbol[iid] = sym
+
+                if not id_to_symbol:
+                    continue
+
+                # Aggregate volume per outright contract
                 volumes: dict[str, int] = {}
                 for record in data:
-                    sym = getattr(record, "raw_symbol", "") or ""
-                    sym = sym.rstrip("\x00").strip()
+                    iid = str(getattr(record, "instrument_id", ""))
                     vol = getattr(record, "volume", 0) or 0
-                    if mnq_pattern.match(sym):
+                    sym = id_to_symbol.get(iid)
+                    if sym:
                         volumes[sym] = volumes.get(sym, 0) + vol
 
                 if volumes:
