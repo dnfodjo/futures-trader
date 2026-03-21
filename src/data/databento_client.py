@@ -357,13 +357,20 @@ class DatabentoClient:
 
             # 10-level order book depth for order flow analysis (optional)
             if self._depth_handlers and self._mbp10_authorized:
-                self._client.subscribe(
-                    dataset=self._config.dataset,
-                    schema="mbp-10",
-                    stype_in="raw_symbol",
-                    symbols=[trading_symbol],
-                )
-                logger.info("databento.mbp10_subscribed", symbol=trading_symbol)
+                try:
+                    self._client.subscribe(
+                        dataset=self._config.dataset,
+                        schema="mbp-10",
+                        stype_in="raw_symbol",
+                        symbols=[trading_symbol],
+                    )
+                    logger.info("databento.mbp10_subscribed", symbol=trading_symbol)
+                except Exception:
+                    self._mbp10_authorized = False
+                    logger.warning(
+                        "databento.mbp10_not_authorized",
+                        msg="mbp-10 subscription rejected at connect — using trade data only.",
+                    )
 
             # Cross-market instruments (ES): use parent for auto-roll
             if cross_market_symbols:
