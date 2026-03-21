@@ -218,7 +218,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
 
     multi_instrument = MultiInstrumentPoller()
 
-    calendar = EconomicCalendar()
+    calendar = EconomicCalendar(finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""))
 
     state_engine = StateEngine(
         tick_processor=tick_processor,
