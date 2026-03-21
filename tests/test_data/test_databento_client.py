@@ -351,30 +351,34 @@ class TestResolveFrontMonth:
     """Tests for resolve_front_month() and update_symbol()."""
 
     @patch("src.data.databento_client.db", create=True)
-    def test_resolve_front_month_success(self, mock_db):
-        """Should resolve MNQ.c.0 continuous to front-month raw symbol."""
+    def test_resolve_by_volume_picks_highest(self, mock_db):
+        """Should pick the contract with highest volume (like Tradovate)."""
         mock_client = MagicMock()
         mock_db.Historical.return_value = mock_client
 
-        # Mock the definition record returned by timeseries.get_range
-        mock_record = MagicMock()
-        mock_record.raw_symbol = "MNQM6"
-        mock_client.timeseries.get_range.return_value = [mock_record]
+        # Two contracts: MNQH6 (low vol, expiring) and MNQM6 (high vol, front month)
+        rec_h = MagicMock()
+        rec_h.raw_symbol = "MNQH6"
+        rec_h.volume = 50_000
+        rec_m = MagicMock()
+        rec_m.raw_symbol = "MNQM6"
+        rec_m.volume = 200_000
+        mock_client.timeseries.get_range.return_value = [rec_h, rec_m]
 
         with patch.dict("sys.modules", {"databento": mock_db}):
             result = DatabentoClient.resolve_front_month(api_key="test-key")
 
         assert result == "MNQM6"
-        mock_client.timeseries.get_range.assert_called_once()
 
     @patch("src.data.databento_client.db", create=True)
-    def test_resolve_front_month_strips_null_bytes(self, mock_db):
+    def test_resolve_strips_null_bytes(self, mock_db):
         """Should strip null bytes from raw_symbol."""
         mock_client = MagicMock()
         mock_db.Historical.return_value = mock_client
-        mock_record = MagicMock()
-        mock_record.raw_symbol = "MNQM6\x00\x00\x00"
-        mock_client.timeseries.get_range.return_value = [mock_record]
+        rec = MagicMock()
+        rec.raw_symbol = "MNQM6\x00\x00\x00"
+        rec.volume = 100_000
+        mock_client.timeseries.get_range.return_value = [rec]
 
         with patch.dict("sys.modules", {"databento": mock_db}):
             result = DatabentoClient.resolve_front_month(api_key="test-key")
@@ -382,8 +386,31 @@ class TestResolveFrontMonth:
         assert result == "MNQM6"
 
     @patch("src.data.databento_client.db", create=True)
-    def test_resolve_front_month_no_records(self, mock_db):
-        """Should return None when no definition records returned."""
+    def test_falls_back_to_continuous_when_volume_fails(self, mock_db):
+        """Should fall back to MNQ.c.0 continuous if volume approach fails."""
+        mock_client = MagicMock()
+        mock_db.Historical.return_value = mock_client
+
+        # First calls (volume-based with ohlcv-1d) all fail
+        # Then continuous definition call succeeds
+        def side_effect(**kwargs):
+            if kwargs.get("schema") == "ohlcv-1d":
+                raise Exception("no data")
+            # definition schema — return a record
+            rec = MagicMock()
+            rec.raw_symbol = "MNQM6"
+            return [rec]
+
+        mock_client.timeseries.get_range.side_effect = side_effect
+
+        with patch.dict("sys.modules", {"databento": mock_db}):
+            result = DatabentoClient.resolve_front_month(api_key="test-key")
+
+        assert result == "MNQM6"
+
+    @patch("src.data.databento_client.db", create=True)
+    def test_resolve_no_records(self, mock_db):
+        """Should return None when no records found from either strategy."""
         mock_client = MagicMock()
         mock_db.Historical.return_value = mock_client
         mock_client.timeseries.get_range.return_value = []
@@ -394,7 +421,7 @@ class TestResolveFrontMonth:
         assert result is None
 
     @patch("src.data.databento_client.db", create=True)
-    def test_resolve_front_month_api_failure(self, mock_db):
+    def test_resolve_api_failure(self, mock_db):
         """Should return None on API error."""
         mock_client = MagicMock()
         mock_db.Historical.return_value = mock_client
@@ -405,11 +432,29 @@ class TestResolveFrontMonth:
 
         assert result is None
 
-    def test_resolve_front_month_no_databento(self):
+    def test_resolve_no_databento(self):
         """Should return None if databento module not installed."""
         with patch.dict("sys.modules", {"databento": None}):
             result = DatabentoClient.resolve_front_month(api_key="test-key")
         assert result is None
+
+    @patch("src.data.databento_client.db", create=True)
+    def test_ignores_non_mnq_symbols(self, mock_db):
+        """Should ignore non-MNQ contracts in volume comparison."""
+        mock_client = MagicMock()
+        mock_db.Historical.return_value = mock_client
+        rec_es = MagicMock()
+        rec_es.raw_symbol = "ESH6"
+        rec_es.volume = 999_999
+        rec_mnq = MagicMock()
+        rec_mnq.raw_symbol = "MNQM6"
+        rec_mnq.volume = 100_000
+        mock_client.timeseries.get_range.return_value = [rec_es, rec_mnq]
+
+        with patch.dict("sys.modules", {"databento": mock_db}):
+            result = DatabentoClient.resolve_front_month(api_key="test-key")
+
+        assert result == "MNQM6"
 
     def test_update_symbol_changes_config(self, db_config, trading_config):
         """Should update trading config and subscription list."""

@@ -143,18 +143,16 @@ class DatabentoClient:
         api_key: str,
         dataset: str = "GLBX.MDP3",
     ) -> str | None:
-        """Resolve the current front-month MNQ contract via Databento.
+        """Resolve the current front-month MNQ contract by highest volume.
 
-        Uses ``MNQ.c.0`` (continuous front-month) with the ``definition`` schema
-        to fetch the instrument definition record, which contains the ``raw_symbol``
-        field (e.g., "MNQM6").
+        Fetches daily OHLCV bars for ALL active MNQ contracts via the parent
+        symbol ``MNQ.FUT`` and picks the contract with the most volume —
+        exactly how Tradovate determines the front month.
 
-        Note: ``symbology.resolve()`` only supports ``stype_out="instrument_id"``,
-        so we use ``timeseries.get_range(schema="definition")`` instead, which
-        returns the full instrument definition including the raw symbol.
+        Falls back to Databento's continuous contract mapping (``MNQ.c.0``)
+        if the volume-based approach fails.
 
         MNQ contract months: H=Mar, M=Jun, U=Sep, Z=Dec.
-        Example: In March 2026, this returns "MNQM6" (June 2026 front month).
 
         Returns:
             The raw symbol string (e.g., "MNQM6") or None on error.
@@ -169,44 +167,17 @@ class DatabentoClient:
             client = db.Historical(key=api_key)
             today = datetime.now(tz=UTC)
 
-            # Try progressively older date ranges until we find available
-            # data.  The historical API has a processing delay so today's
-            # data may not be ready yet.  We want the MOST RECENT definition
-            # to get the correct post-rollover contract.
-            raw_symbol: str | None = None
-            for days_back in (0, 1, 2, 3, 5):
-                target = today - timedelta(days=days_back)
-                start = target.strftime("%Y-%m-%dT00:00")
-                end = target.strftime("%Y-%m-%dT23:59")
-                try:
-                    data = client.timeseries.get_range(
-                        dataset=dataset,
-                        symbols=["MNQ.c.0"],
-                        stype_in="continuous",
-                        schema="definition",
-                        start=start,
-                        end=end,
-                    )
-                    for record in data:
-                        sym = getattr(record, "raw_symbol", None)
-                        if sym:
-                            sym = sym.rstrip("\x00").strip()
-                            if sym.startswith("MNQ"):
-                                raw_symbol = sym
-                                break
-                    if raw_symbol:
-                        break
-                except Exception:
-                    # data_start_after_available_end or similar — try older date
-                    continue
+            # ── Strategy 1: Volume-based (matches Tradovate) ──────────
+            # Fetch daily bars for ALL active MNQ contracts.  The one
+            # with the highest volume is the front-month.
+            symbol = DatabentoClient._resolve_by_volume(client, dataset, today)
+            if symbol:
+                return symbol
 
-            if raw_symbol:
-                logger.info(
-                    "databento.front_month_resolved",
-                    raw_symbol=raw_symbol,
-                    days_back=days_back,
-                )
-                return raw_symbol
+            # ── Strategy 2: Continuous contract mapping (fallback) ────
+            symbol = DatabentoClient._resolve_by_continuous(client, dataset, today)
+            if symbol:
+                return symbol
 
             logger.warning("databento.resolve_front_month_empty")
             return None
@@ -214,6 +185,90 @@ class DatabentoClient:
         except Exception:
             logger.warning("databento.resolve_front_month_failed", exc_info=True)
             return None
+
+    @staticmethod
+    def _resolve_by_volume(client: Any, dataset: str, today: datetime) -> str | None:
+        """Pick the MNQ contract with the highest daily volume.
+
+        Fetches ``ohlcv-1d`` bars for all active MNQ contracts via the
+        ``MNQ.FUT`` parent symbol.  Tries progressively older dates
+        until data is available (historical API has a processing delay).
+        """
+        import re
+
+        mnq_pattern = re.compile(r"^MNQ[HMUZ]\d$")
+
+        for days_back in (1, 2, 3, 5):
+            target = today - timedelta(days=days_back)
+            start = target.strftime("%Y-%m-%dT00:00")
+            end = target.strftime("%Y-%m-%dT23:59")
+            try:
+                data = client.timeseries.get_range(
+                    dataset=dataset,
+                    symbols=["MNQ.FUT"],
+                    stype_in="parent",
+                    schema="ohlcv-1d",
+                    start=start,
+                    end=end,
+                )
+
+                # Aggregate volume per raw_symbol
+                volumes: dict[str, int] = {}
+                for record in data:
+                    sym = getattr(record, "raw_symbol", "") or ""
+                    sym = sym.rstrip("\x00").strip()
+                    vol = getattr(record, "volume", 0) or 0
+                    if mnq_pattern.match(sym):
+                        volumes[sym] = volumes.get(sym, 0) + vol
+
+                if volumes:
+                    best = max(volumes, key=volumes.get)  # type: ignore[arg-type]
+                    logger.info(
+                        "databento.front_month_by_volume",
+                        symbol=best,
+                        volume=volumes[best],
+                        candidates={k: v for k, v in sorted(
+                            volumes.items(), key=lambda x: x[1], reverse=True
+                        )},
+                        days_back=days_back,
+                    )
+                    return best
+            except Exception:
+                continue
+
+        return None
+
+    @staticmethod
+    def _resolve_by_continuous(client: Any, dataset: str, today: datetime) -> str | None:
+        """Fallback: use Databento's continuous contract mapping (MNQ.c.0)."""
+        for days_back in (0, 1, 2, 3, 5):
+            target = today - timedelta(days=days_back)
+            start = target.strftime("%Y-%m-%dT00:00")
+            end = target.strftime("%Y-%m-%dT23:59")
+            try:
+                data = client.timeseries.get_range(
+                    dataset=dataset,
+                    symbols=["MNQ.c.0"],
+                    stype_in="continuous",
+                    schema="definition",
+                    start=start,
+                    end=end,
+                )
+                for record in data:
+                    sym = getattr(record, "raw_symbol", None)
+                    if sym:
+                        sym = sym.rstrip("\x00").strip()
+                        if sym.startswith("MNQ"):
+                            logger.info(
+                                "databento.front_month_by_continuous",
+                                raw_symbol=sym,
+                                days_back=days_back,
+                            )
+                            return sym
+            except Exception:
+                continue
+
+        return None
 
     def update_symbol(self, new_symbol: str) -> bool:
         """Hot-swap the trading symbol if the front-month contract changed.
