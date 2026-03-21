@@ -881,15 +881,11 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
         background_tasks.append(se_task)
         logger.info("main.state_engine_started")
 
-        # Reload persisted bars on startup so EMAs/OBs warm instantly
-        # instead of rebuilding from scratch over 30-90 minutes.
-        bars_loaded = state_engine.reload_persisted_bars()
-
         # ── Step 4b2: Warm EMAs from Databento historical 1m bars ──────────
-        # If no persisted bars for today (fresh day / post-weekend), fetch
-        # 2 days of 1-min OHLCV from Databento (~2700 bars) so EMAs on
-        # 5m/15m/30m are seeded immediately instead of waiting hours.
-        if not bars_loaded and not dry_run and config.databento.api_key:
+        # Always fetch 2 days of 1-min OHLCV from Databento (~2700 bars)
+        # so EMAs on 5m/15m/30m are seeded immediately on every startup.
+        # Persisted bars are a fallback if the Databento fetch fails.
+        if not dry_run and config.databento.api_key:
             try:
                 from src.data.databento_client import DatabentoClient as _DBC
 
@@ -908,10 +904,12 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
                     )
                 else:
                     logger.warning("main.ema_warmup_no_data",
-                                   msg="No historical 1m bars — EMAs will build from live data")
+                                   msg="No historical 1m bars — trying persisted bars")
+                    state_engine.reload_persisted_bars()
             except Exception:
                 logger.warning("main.ema_warmup_failed", exc_info=True,
-                               msg="EMA warmup failed — EMAs will build from live data")
+                               msg="EMA warmup failed — trying persisted bars")
+                state_engine.reload_persisted_bars()
 
         # ── Step 4c: Load HTF structure levels from Databento historical ──
         structure_manager = components.get("structure_manager")
