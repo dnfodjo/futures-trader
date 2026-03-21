@@ -823,14 +823,23 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
 
                 front_month = _DBC.resolve_front_month(api_key=config.databento.api_key)
                 if front_month and front_month != config.trading.symbol:
-                    old_symbol = config.trading.symbol
-                    config.trading.symbol = front_month
-                    logger.info(
-                        "main.contract_auto_rolled",
-                        old_symbol=old_symbol,
-                        new_symbol=front_month,
-                        msg=f"Auto-rolled contract: {old_symbol} → {front_month}",
-                    )
+                    # Only roll FORWARD — never backwards to an expired contract
+                    if _DBC.is_forward_roll(config.trading.symbol, front_month):
+                        old_symbol = config.trading.symbol
+                        config.trading.symbol = front_month
+                        logger.info(
+                            "main.contract_auto_rolled",
+                            old_symbol=old_symbol,
+                            new_symbol=front_month,
+                            msg=f"Auto-rolled contract: {old_symbol} → {front_month}",
+                        )
+                    else:
+                        logger.info(
+                            "main.contract_roll_skipped_backward",
+                            current=config.trading.symbol,
+                            resolved=front_month,
+                            msg="Resolved contract is older — keeping current",
+                        )
                 elif front_month:
                     logger.info("main.contract_symbol_confirmed", symbol=front_month)
             except Exception:
@@ -967,6 +976,13 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
                 if not front_month:
                     return
                 if front_month != config.trading.symbol:
+                    if not _DBC.is_forward_roll(config.trading.symbol, front_month):
+                        logger.info(
+                            "main.contract_roll_skipped_backward",
+                            current=config.trading.symbol,
+                            resolved=front_month,
+                        )
+                        return
                     old_symbol = config.trading.symbol
                     config.trading.symbol = front_month
                     # Also update the live Databento client's subscription list

@@ -110,6 +110,34 @@ class DatabentoClient:
 
     # ── Contract Auto-Roll ───────────────────────────────────────────────
 
+    # Contract month codes → calendar order (for forward-only roll check)
+    _MONTH_ORDER: dict[str, int] = {"H": 3, "M": 6, "U": 9, "Z": 12}
+
+    @staticmethod
+    def is_forward_roll(current_symbol: str, new_symbol: str) -> bool:
+        """Check if rolling from current to new is a forward roll.
+
+        MNQ contract format: MNQ{month_code}{year_digit}
+        Month codes: H=Mar(3), M=Jun(6), U=Sep(9), Z=Dec(12)
+        Year digit: last digit of year (e.g., 6 = 2026)
+
+        Returns True if new_symbol is a LATER contract than current_symbol.
+        """
+        order = DatabentoClient._MONTH_ORDER
+        try:
+            cur_month = order.get(current_symbol[3], 0)
+            cur_year = int(current_symbol[4])
+            new_month = order.get(new_symbol[3], 0)
+            new_year = int(new_symbol[4])
+        except (IndexError, ValueError):
+            return False
+
+        if new_year > cur_year:
+            return True
+        if new_year == cur_year and new_month > cur_month:
+            return True
+        return False
+
     @staticmethod
     def resolve_front_month(
         api_key: str,
@@ -140,34 +168,45 @@ class DatabentoClient:
         try:
             client = db.Historical(key=api_key)
             today = datetime.now(tz=UTC)
-            # Use a 3-day lookback — historical API has a processing delay
-            # so today's data may not be available yet, and weekends have
-            # no data either.  The definition record maps to whichever
-            # contract is currently the front-month.
-            start = (today - timedelta(days=3)).strftime("%Y-%m-%dT00:00")
-            end = (today - timedelta(days=1)).strftime("%Y-%m-%dT23:59")
 
-            data = client.timeseries.get_range(
-                dataset=dataset,
-                symbols=["MNQ.c.0"],
-                stype_in="continuous",
-                schema="definition",
-                start=start,
-                end=end,
-            )
+            # Try progressively older date ranges until we find available
+            # data.  The historical API has a processing delay so today's
+            # data may not be ready yet.  We want the MOST RECENT definition
+            # to get the correct post-rollover contract.
+            raw_symbol: str | None = None
+            for days_back in (0, 1, 2, 3, 5):
+                target = today - timedelta(days=days_back)
+                start = target.strftime("%Y-%m-%dT00:00")
+                end = target.strftime("%Y-%m-%dT23:59")
+                try:
+                    data = client.timeseries.get_range(
+                        dataset=dataset,
+                        symbols=["MNQ.c.0"],
+                        stype_in="continuous",
+                        schema="definition",
+                        start=start,
+                        end=end,
+                    )
+                    for record in data:
+                        sym = getattr(record, "raw_symbol", None)
+                        if sym:
+                            sym = sym.rstrip("\x00").strip()
+                            if sym.startswith("MNQ"):
+                                raw_symbol = sym
+                                break
+                    if raw_symbol:
+                        break
+                except Exception:
+                    # data_start_after_available_end or similar — try older date
+                    continue
 
-            # Parse instrument definition records for raw_symbol
-            for record in data:
-                raw_symbol = getattr(record, "raw_symbol", None)
-                if raw_symbol:
-                    # Strip null bytes that Databento sometimes includes
-                    raw_symbol = raw_symbol.rstrip("\x00").strip()
-                    if raw_symbol.startswith("MNQ"):
-                        logger.info(
-                            "databento.front_month_resolved",
-                            raw_symbol=raw_symbol,
-                        )
-                        return raw_symbol
+            if raw_symbol:
+                logger.info(
+                    "databento.front_month_resolved",
+                    raw_symbol=raw_symbol,
+                    days_back=days_back,
+                )
+                return raw_symbol
 
             logger.warning("databento.resolve_front_month_empty")
             return None

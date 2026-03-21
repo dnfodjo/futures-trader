@@ -433,6 +433,31 @@ class TestResolveFrontMonth:
         assert trading_config.symbol == "MNQM6"
 
 
+class TestIsForwardRoll:
+    """Tests for is_forward_roll() contract comparison."""
+
+    def test_forward_roll_h_to_m(self):
+        assert DatabentoClient.is_forward_roll("MNQH6", "MNQM6") is True
+
+    def test_forward_roll_m_to_u(self):
+        assert DatabentoClient.is_forward_roll("MNQM6", "MNQU6") is True
+
+    def test_forward_roll_z_to_h_next_year(self):
+        assert DatabentoClient.is_forward_roll("MNQZ5", "MNQH6") is True
+
+    def test_backward_roll_m_to_h(self):
+        assert DatabentoClient.is_forward_roll("MNQM6", "MNQH6") is False
+
+    def test_same_contract(self):
+        assert DatabentoClient.is_forward_roll("MNQM6", "MNQM6") is False
+
+    def test_backward_roll_h6_to_z5(self):
+        assert DatabentoClient.is_forward_roll("MNQH6", "MNQZ5") is False
+
+    def test_invalid_symbol_format(self):
+        assert DatabentoClient.is_forward_roll("MNQ", "MNQM6") is False
+
+
 class TestConfigurableThreshold:
     def test_custom_large_lot_threshold(self, db_config, trading_config):
         """Should use custom large lot threshold."""
