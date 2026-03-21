@@ -13,6 +13,7 @@ that mapping is handled by the config layer.
 from __future__ import annotations
 
 import asyncio
+import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Coroutine, Optional
 
@@ -205,14 +206,16 @@ class DatabentoClient:
             start = target.strftime("%Y-%m-%dT00:00")
             end = target.strftime("%Y-%m-%dT23:59")
             try:
-                data = client.timeseries.get_range(
-                    dataset=dataset,
-                    symbols=["MNQ.FUT"],
-                    stype_in="parent",
-                    schema="ohlcv-1d",
-                    start=start,
-                    end=end,
-                )
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    data = client.timeseries.get_range(
+                        dataset=dataset,
+                        symbols=["MNQ.FUT"],
+                        stype_in="parent",
+                        schema="ohlcv-1d",
+                        start=start,
+                        end=end,
+                    )
 
                 # Build instrument_id → raw_symbol mapping from symbology
                 # OHLCV records only have instrument_id, not raw_symbol
@@ -263,14 +266,16 @@ class DatabentoClient:
             start = target.strftime("%Y-%m-%dT00:00")
             end = target.strftime("%Y-%m-%dT23:59")
             try:
-                data = client.timeseries.get_range(
-                    dataset=dataset,
-                    symbols=["MNQ.c.0"],
-                    stype_in="continuous",
-                    schema="definition",
-                    start=start,
-                    end=end,
-                )
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    data = client.timeseries.get_range(
+                        dataset=dataset,
+                        symbols=["MNQ.c.0"],
+                        stype_in="continuous",
+                        schema="definition",
+                        start=start,
+                        end=end,
+                    )
                 for record in data:
                     sym = getattr(record, "raw_symbol", None)
                     if sym:
@@ -508,13 +513,15 @@ class DatabentoClient:
 
     async def _reconnect(self) -> None:
         """Reconnect to Databento after a stream failure."""
-        # Close the old client
+        # Terminate session first so LiveIterator.__del__ doesn't error,
+        # then close the client connection.
         if self._client is not None:
             try:
-                if hasattr(self._client, "close"):
-                    self._client.close()
-                elif hasattr(self._client, "stop"):
-                    self._client.stop()
+                self._client.stop()
+            except Exception:
+                pass
+            try:
+                self._client.close()
             except Exception:
                 pass
             self._client = None
@@ -874,14 +881,16 @@ class DatabentoClient:
         client = db.Historical(key=api_key)
         records: list[dict[str, Any]] = []
 
-        data = client.timeseries.get_range(
-            dataset=dataset,
-            schema=schema,
-            stype_in="parent",
-            symbols=[symbol],
-            start=start,
-            end=end,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            data = client.timeseries.get_range(
+                dataset=dataset,
+                schema=schema,
+                stype_in="parent",
+                symbols=[symbol],
+                start=start,
+                end=end,
+            )
 
         for record in data:
             record_type = type(record).__name__
@@ -1148,14 +1157,16 @@ class DatabentoClient:
             end_date = datetime.now(tz=UTC)
             start_date = end_date - timedelta(days=int(lookback_days * 1.5 + 5))
 
-            data = client.timeseries.get_range(
-                dataset=dataset,
-                schema=schema,
-                stype_in="parent",
-                symbols=[symbol],
-                start=start_date.strftime("%Y-%m-%d"),
-                end=end_date.strftime("%Y-%m-%d"),
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                data = client.timeseries.get_range(
+                    dataset=dataset,
+                    schema=schema,
+                    stype_in="parent",
+                    symbols=[symbol],
+                    start=start_date.strftime("%Y-%m-%d"),
+                    end=end_date.strftime("%Y-%m-%d"),
+                )
 
             bars: list[dict] = []
             for record in data:
