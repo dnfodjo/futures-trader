@@ -678,6 +678,8 @@ class DatabentoClient:
                 return None
             if not (self._MNQ_PRICE_MIN <= bid_price <= self._MNQ_PRICE_MAX):
                 return None
+            if not (self._MNQ_PRICE_MIN <= ask_price <= self._MNQ_PRICE_MAX):
+                return None
 
             symbol = self._resolve_symbol(record, price=bid_price)
 
@@ -715,6 +717,11 @@ class DatabentoClient:
                     lvl = raw_levels[i]
                     bid_px = lvl.bid_px / 1e9 if lvl.bid_px > 1e6 else lvl.bid_px
                     ask_px = lvl.ask_px / 1e9 if lvl.ask_px > 1e6 else lvl.ask_px
+                    # Skip sentinel / out-of-range levels
+                    if bid_px >= self._SENTINEL_PRICE or ask_px >= self._SENTINEL_PRICE:
+                        continue
+                    if bid_px <= 0 or ask_px <= 0:
+                        continue
                     levels_data.append({
                         "bid_price": bid_px,
                         "bid_size": lvl.bid_sz,
@@ -732,6 +739,11 @@ class DatabentoClient:
                         bp /= 1e9
                     if ap > 1e6:
                         ap /= 1e9
+                    # Skip sentinel / out-of-range levels
+                    if bp >= DatabentoClient._SENTINEL_PRICE or ap >= DatabentoClient._SENTINEL_PRICE:
+                        continue
+                    if bp <= 0 or ap <= 0:
+                        continue
                     levels_data.append({
                         "bid_price": bp,
                         "bid_size": bs,
@@ -1006,6 +1018,14 @@ class DatabentoClient:
                 else:
                     continue
 
+                # Skip sentinel / out-of-range prices
+                if bid_price >= DatabentoClient._SENTINEL_PRICE or ask_price >= DatabentoClient._SENTINEL_PRICE:
+                    continue
+                if not (DatabentoClient._MNQ_PRICE_MIN <= bid_price <= DatabentoClient._MNQ_PRICE_MAX):
+                    continue
+                if not (DatabentoClient._MNQ_PRICE_MIN <= ask_price <= DatabentoClient._MNQ_PRICE_MAX):
+                    continue
+
                 ts_event = getattr(record, "ts_event", None)
                 ts = (
                     datetime.fromtimestamp(ts_event / 1e9, tz=UTC)
@@ -1205,6 +1225,10 @@ class DatabentoClient:
         # Schema mapping: native vs aggregated
         # 1w uses calendar-week aggregation (not count-based) to handle holidays
         schema_map = {
+            "1m": ("ohlcv-1m", None),
+            "5m": ("ohlcv-1m", 5),
+            "15m": ("ohlcv-1m", 15),
+            "30m": ("ohlcv-1m", 30),
             "1h": ("ohlcv-1h", None),
             "4h": ("ohlcv-1h", 4),
             "1d": ("ohlcv-1d", None),
@@ -1254,6 +1278,12 @@ class DatabentoClient:
                 high_price = record.high / 1e9 if record.high > 1e6 else record.high
                 low_price = record.low / 1e9 if record.low > 1e6 else record.low
                 close_price = record.close / 1e9 if record.close > 1e6 else record.close
+
+                # Skip sentinel / out-of-range prices
+                if close_price >= DatabentoClient._SENTINEL_PRICE or close_price <= 0:
+                    continue
+                if not (DatabentoClient._MNQ_PRICE_MIN <= close_price <= DatabentoClient._MNQ_PRICE_MAX):
+                    continue
 
                 # Timestamp from nanoseconds
                 ts_event = record.ts_event

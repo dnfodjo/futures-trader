@@ -883,7 +883,35 @@ async def run(config: Optional[AppConfig] = None, dry_run: bool = False) -> None
 
         # Reload persisted bars on startup so EMAs/OBs warm instantly
         # instead of rebuilding from scratch over 30-90 minutes.
-        state_engine.reload_persisted_bars()
+        bars_loaded = state_engine.reload_persisted_bars()
+
+        # ── Step 4b2: Warm EMAs from Databento historical 1m bars ──────────
+        # If no persisted bars for today (fresh day / post-weekend), fetch
+        # 2 days of 1-min OHLCV from Databento (~2700 bars) so EMAs on
+        # 5m/15m/30m are seeded immediately instead of waiting hours.
+        if not bars_loaded and not dry_run and config.databento.api_key:
+            try:
+                from src.data.databento_client import DatabentoClient as _DBC
+
+                hist_1m_bars = await _DBC.fetch_htf_bars(
+                    api_key=config.databento.api_key,
+                    timeframe="1m",
+                    lookback_days=2,
+                )
+                if hist_1m_bars:
+                    # warm_1min_bars handles both datetime and string timestamps
+                    state_engine.warm_1min_bars(hist_1m_bars)
+                    logger.info(
+                        "main.ema_warmup_from_historical",
+                        bars=len(hist_1m_bars),
+                        msg="EMAs seeded from 2-day historical 1m bars",
+                    )
+                else:
+                    logger.warning("main.ema_warmup_no_data",
+                                   msg="No historical 1m bars — EMAs will build from live data")
+            except Exception:
+                logger.warning("main.ema_warmup_failed", exc_info=True,
+                               msg="EMA warmup failed — EMAs will build from live data")
 
         # ── Step 4c: Load HTF structure levels from Databento historical ──
         structure_manager = components.get("structure_manager")
