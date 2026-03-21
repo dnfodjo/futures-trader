@@ -418,6 +418,24 @@ class DatabentoClient:
         consecutive_failures = 0
         logger.info("databento.streaming_started")
 
+        # Suppress "Future exception was never retrieved" for mbp-10 auth
+        # failures. The Databento SDK fires a background Future that raises
+        # before our stream loop can catch it. We handle it in the except
+        # block below, so the stderr warning is just noise.
+        loop = asyncio.get_event_loop()
+        _default_handler = loop.get_exception_handler()
+
+        def _quiet_handler(l: asyncio.AbstractEventLoop, ctx: dict) -> None:
+            exc = ctx.get("exception")
+            if exc and "not authorized" in str(exc).lower():
+                return  # silently ignore — handled in stream loop
+            if _default_handler:
+                _default_handler(l, ctx)
+            else:
+                l.default_exception_handler(ctx)
+
+        loop.set_exception_handler(_quiet_handler)
+
         try:
             while self._running:
                 try:
