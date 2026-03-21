@@ -1,9 +1,9 @@
 """Economic calendar — loads events and identifies blackout windows.
 
 Sources:
-1. Static FOMC dates (hardcoded — always known far in advance)
-2. Finnhub free API for daily economic releases (CPI, NFP, etc.)
-3. Local JSON fallback if Finnhub is unavailable
+1. ForexFactory free JSON feed (no API key required) — primary source
+2. Local JSON fallback if ForexFactory is unavailable
+3. Static FOMC dates as last-resort fallback (updated through 2026)
 
 Events are loaded once at startup (pre-market) and cached for the day.
 The clock module uses these events to determine blackout windows.
@@ -26,9 +26,9 @@ logger = structlog.get_logger()
 
 ET = ZoneInfo("US/Eastern")
 
-# ── Static FOMC dates ─────────────────────────────────────────────────────
-# These are ALWAYS high impact. Fed decisions at 2:00 PM ET, press conf at 2:30.
-# Update annually from the Federal Reserve website.
+# ── Static FOMC dates (last-resort fallback) ──────────────────────────────
+# Only used if ForexFactory is unavailable. ForexFactory already includes
+# FOMC events with correct times and impact levels.
 
 _FOMC_DATES: dict[int, list[str]] = {
     2025: [
@@ -43,7 +43,7 @@ _FOMC_DATES: dict[int, list[str]] = {
 
 
 def _get_fomc_events(target_date: str) -> list[EconomicEvent]:
-    """Get FOMC events for a given date (YYYY-MM-DD)."""
+    """Get FOMC events for a given date (YYYY-MM-DD). Fallback only."""
     year = int(target_date[:4])
     fomc_dates = _FOMC_DATES.get(year, [])
 
@@ -71,71 +71,59 @@ def _get_fomc_events(target_date: str) -> list[EconomicEvent]:
     return events
 
 
-# ── Finnhub Integration ──────────────────────────────────────────────────
+# ── ForexFactory Integration ─────────────────────────────────────────────
 
 
-async def fetch_from_finnhub(
-    api_key: str,
-    target_date: str,
+async def fetch_from_forexfactory(
     session: aiohttp.ClientSession | None = None,
 ) -> list[EconomicEvent]:
-    """Fetch economic calendar events from Finnhub for a given date.
+    """Fetch economic calendar events from ForexFactory free JSON feed.
 
-    Finnhub free tier: https://finnhub.io/api/v1/calendar/economic
-    Rate limit: 60 calls/minute on free tier.
-
-    Args:
-        api_key: Finnhub API key (free tier works)
-        target_date: "YYYY-MM-DD" format
-        session: Optional aiohttp session to reuse
+    No API key required. Returns all events for the current week.
+    Source: https://nfs.faireconomy.media/ff_calendar_thisweek.json
     """
-    url = "https://finnhub.io/api/v1/calendar/economic"
-    params = {
-        "from": target_date,
-        "to": target_date,
-        "token": api_key,
-    }
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
     own_session = session is None
     if own_session:
         session = aiohttp.ClientSession()
 
     try:
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status != 200:
-                logger.warning("finnhub.fetch_failed", status=resp.status)
+                logger.warning("forexfactory.fetch_failed", status=resp.status)
                 return []
-            data = await resp.json()
+            data = await resp.json(content_type=None)
     except Exception as e:
-        logger.warning("finnhub.fetch_error", error=str(e))
+        logger.warning("forexfactory.fetch_error", error=str(e))
         return []
     finally:
         if own_session:
             await session.close()
 
-    return _parse_finnhub_response(data)
+    return _parse_forexfactory_response(data)
 
 
-def _parse_finnhub_response(data: dict[str, Any]) -> list[EconomicEvent]:
-    """Parse Finnhub economic calendar response into EconomicEvent list."""
+def _parse_forexfactory_response(data: list[dict[str, Any]]) -> list[EconomicEvent]:
+    """Parse ForexFactory JSON feed into EconomicEvent list."""
     events = []
-    raw_events = data.get("economicCalendar", [])
 
-    for item in raw_events:
+    for item in data:
         # Only US events matter for MNQ trading
         country = item.get("country", "")
-        if country != "US":
+        if country != "USD":
             continue
 
-        name = item.get("event", "Unknown Event")
-        impact_str = item.get("impact", "low")
+        name = item.get("title", "Unknown Event")
+        impact_raw = item.get("impact", "Low")
 
-        # Parse Finnhub impact levels
-        impact = _classify_finnhub_impact(impact_str, name)
+        # Map ForexFactory impact levels
+        impact = _classify_ff_impact(impact_raw, name)
 
-        # Parse time — Finnhub uses "YYYY-MM-DD HH:MM:SS" in UTC
-        time_str = item.get("time", "")
-        event_time = _parse_finnhub_time(time_str, item.get("date", ""))
+        # Parse time — ForexFactory uses ISO 8601 with timezone offset
+        # e.g., "2026-03-18T14:00:00-04:00"
+        date_str = item.get("date", "")
+        event_time = _parse_ff_time(date_str)
 
         if event_time is None:
             continue
@@ -145,33 +133,41 @@ def _parse_finnhub_response(data: dict[str, Any]) -> list[EconomicEvent]:
                 time=event_time,
                 name=name,
                 impact=impact,
-                prior=str(item.get("prev", "")) if item.get("prev") is not None else None,
-                forecast=str(item.get("estimate", "")) if item.get("estimate") is not None else None,
+                prior=item.get("previous") or None,
+                forecast=item.get("forecast") or None,
             )
         )
 
     return events
 
 
-def _classify_finnhub_impact(impact_str: str, name: str) -> str:
+def _classify_ff_impact(impact_str: str, name: str) -> str:
     """Classify event impact level.
 
-    Some events are always high-impact regardless of Finnhub's classification.
+    Some events are always high-impact regardless of ForexFactory's classification.
     """
-    # Always high-impact events
+    # Always high-impact events (override ForexFactory's classification)
     always_high = {
         "nonfarm payrolls",
         "cpi",
         "consumer price index",
+        "core cpi",
         "fomc",
+        "federal funds rate",
         "fed interest rate",
+        "unemployment claims",
         "initial jobless claims",
         "gdp",
         "pce",
+        "core pce",
         "ppi",
+        "core ppi",
         "ism manufacturing",
         "ism services",
         "retail sales",
+        "fomc statement",
+        "fomc press conference",
+        "fomc economic projections",
     }
 
     name_lower = name.lower()
@@ -179,37 +175,29 @@ def _classify_finnhub_impact(impact_str: str, name: str) -> str:
         if keyword in name_lower:
             return "high"
 
-    # Map Finnhub's impact levels
+    # Map ForexFactory impact levels
     impact_map = {
         "high": "high",
         "medium": "medium",
         "low": "low",
-        "3": "high",  # Finnhub numeric scale
-        "2": "medium",
-        "1": "low",
+        "non-economic": "low",
+        "holiday": "low",
     }
-    return impact_map.get(str(impact_str).lower(), "low")
+    return impact_map.get(impact_str.lower(), "low")
 
 
-def _parse_finnhub_time(time_str: str, date_str: str) -> datetime | None:
-    """Parse Finnhub time format to timezone-aware datetime."""
-    if time_str:
-        try:
-            # Format: "HH:MM:SS" — combine with date
-            dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
-            return dt.replace(tzinfo=ZoneInfo("UTC"))
-        except ValueError:
-            pass
+def _parse_ff_time(date_str: str) -> datetime | None:
+    """Parse ForexFactory ISO 8601 datetime to timezone-aware datetime."""
+    if not date_str:
+        return None
 
-    if date_str:
-        try:
-            # Fallback: just the date, assume 8:30 AM ET (common release time)
-            dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
-                hour=8, minute=30, tzinfo=ET
-            )
-            return dt
-        except ValueError:
-            pass
+    try:
+        # ISO 8601 with offset: "2026-03-18T14:00:00-04:00"
+        dt = datetime.fromisoformat(date_str)
+        # Convert to ET for consistency
+        return dt.astimezone(ET)
+    except (ValueError, TypeError):
+        pass
 
     return None
 
@@ -277,30 +265,31 @@ def load_from_file(filepath: str | Path) -> list[EconomicEvent]:
 class EconomicCalendar:
     """Economic calendar manager.
 
-    Loads events from multiple sources, caches for the day, and provides
-    query methods for the system to check upcoming events and blackout windows.
+    Loads events from ForexFactory (free, no API key), caches for the day,
+    and provides query methods for checking upcoming events and blackout windows.
 
     Usage:
-        calendar = EconomicCalendar(finnhub_api_key="xxx")
+        calendar = EconomicCalendar()
         await calendar.load_today()
         events = calendar.upcoming_events(within_minutes=30)
     """
 
     def __init__(
         self,
-        finnhub_api_key: str = "",
         local_calendar_path: str | Path | None = None,
     ) -> None:
-        self._finnhub_key = finnhub_api_key
         self._local_path = local_calendar_path
         self._events: list[EconomicEvent] = []
         self._loaded_date: str = ""
+        self._ff_events_cache: list[EconomicEvent] = []
 
     async def load_today(self, target_date: str | None = None) -> None:
         """Load economic events for today (or a specific date).
 
-        Fetches from Finnhub first, falls back to local file, and always
-        includes static FOMC dates.
+        Priority:
+        1. ForexFactory free feed (primary — has FOMC, CPI, NFP, everything)
+        2. Local JSON file (if configured)
+        3. Static FOMC dates (last-resort fallback if ForexFactory is down)
 
         Args:
             target_date: "YYYY-MM-DD" format. Defaults to today (ET).
@@ -309,44 +298,55 @@ class EconomicCalendar:
             target_date = datetime.now(ET).strftime("%Y-%m-%d")
 
         events: list[EconomicEvent] = []
+        existing_names: set[str] = set()
+        ff_loaded = False
 
-        # 1. Static FOMC dates (always included)
-        fomc = _get_fomc_events(target_date)
-        events.extend(fomc)
-        if fomc:
-            logger.info("economic_calendar.fomc_day", count=len(fomc))
+        # 1. ForexFactory (primary source — free, no API key)
+        try:
+            ff_all = await fetch_from_forexfactory()
+            # Filter to target date only
+            ff_today = [
+                e for e in ff_all
+                if e.time.astimezone(ET).strftime("%Y-%m-%d") == target_date
+            ]
+            for e in ff_today:
+                events.append(e)
+                existing_names.add(e.name.lower())
+            self._ff_events_cache = ff_all  # Cache full week for next-day lookups
+            ff_loaded = len(ff_today) > 0 or len(ff_all) > 0
+            logger.info(
+                "economic_calendar.forexfactory_loaded",
+                total_week=len(ff_all),
+                today=len(ff_today),
+                date=target_date,
+            )
+        except Exception:
+            logger.exception("economic_calendar.forexfactory_error")
 
-        # Track existing event names for deduplication across all sources
-        existing_names = {e.name.lower() for e in events}
-
-        # 2. Finnhub API
-        if self._finnhub_key:
-            try:
-                finnhub_events = await fetch_from_finnhub(self._finnhub_key, target_date)
-                for e in finnhub_events:
-                    if e.name.lower() not in existing_names:
-                        events.append(e)
-                        existing_names.add(e.name.lower())
-                logger.info(
-                    "economic_calendar.finnhub_loaded",
-                    count=len(finnhub_events),
-                    date=target_date,
-                )
-            except Exception:
-                logger.exception("economic_calendar.finnhub_error")
-
-        # 3. Local file fallback
+        # 2. Local file fallback
         if self._local_path:
             local_events = load_from_file(self._local_path)
-            # Filter to target date
             local_for_today = [
                 e for e in local_events if e.time.strftime("%Y-%m-%d") == target_date
             ]
-            # Deduplicate by name
             for e in local_for_today:
                 if e.name.lower() not in existing_names:
                     events.append(e)
                     existing_names.add(e.name.lower())
+
+        # 3. Static FOMC fallback (only if ForexFactory didn't load)
+        if not ff_loaded:
+            fomc = _get_fomc_events(target_date)
+            for e in fomc:
+                if e.name.lower() not in existing_names:
+                    events.append(e)
+                    existing_names.add(e.name.lower())
+            if fomc:
+                logger.info(
+                    "economic_calendar.fomc_fallback_used",
+                    count=len(fomc),
+                    msg="ForexFactory unavailable — using static FOMC dates",
+                )
 
         # Sort by time
         events.sort(key=lambda e: e.time)
