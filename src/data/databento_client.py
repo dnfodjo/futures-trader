@@ -140,9 +140,12 @@ class DatabentoClient:
         try:
             client = db.Historical(key=api_key)
             today = datetime.now(tz=UTC)
-            # Use a 1-day window ending now to get current definitions
-            start = today.strftime("%Y-%m-%dT00:00")
-            end = today.strftime("%Y-%m-%dT%H:%M")
+            # Use a 3-day lookback — historical API has a processing delay
+            # so today's data may not be available yet, and weekends have
+            # no data either.  The definition record maps to whichever
+            # contract is currently the front-month.
+            start = (today - timedelta(days=3)).strftime("%Y-%m-%dT00:00")
+            end = (today - timedelta(days=1)).strftime("%Y-%m-%dT23:59")
 
             data = client.timeseries.get_range(
                 dataset=dataset,
