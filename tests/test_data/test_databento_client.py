@@ -352,17 +352,20 @@ class TestResolveFrontMonth:
 
     @patch("src.data.databento_client.db", create=True)
     def test_resolve_front_month_success(self, mock_db):
-        """Should resolve MNQ.c.0 to raw symbol via Databento symbology."""
+        """Should resolve MNQ.FUT parent to front-month raw symbol."""
         mock_client = MagicMock()
         mock_db.Historical.return_value = mock_client
         mock_resolution = MagicMock()
-        mock_resolution.result = {"MNQ.c.0": [{"s": "MNQU6"}]}
+        mock_resolution.result = {"MNQ.FUT": [
+            {"d0": "2026-03-21", "d1": "2026-06-20", "s": "MNQM6"},
+            {"d0": "2026-03-21", "d1": "2026-09-18", "s": "MNQU6"},
+        ]}
         mock_client.symbology.resolve.return_value = mock_resolution
 
         with patch.dict("sys.modules", {"databento": mock_db}):
             result = DatabentoClient.resolve_front_month(api_key="test-key")
 
-        assert result == "MNQU6"
+        assert result == "MNQM6"  # first (nearest expiry) is front month
         mock_client.symbology.resolve.assert_called_once()
 
     @patch("src.data.databento_client.db", create=True)
@@ -371,7 +374,7 @@ class TestResolveFrontMonth:
         mock_client = MagicMock()
         mock_db.Historical.return_value = mock_client
         mock_resolution = MagicMock()
-        mock_resolution.result = {"MNQ.c.0": []}
+        mock_resolution.result = {"MNQ.FUT": []}
         mock_client.symbology.resolve.return_value = mock_resolution
 
         with patch.dict("sys.modules", {"databento": mock_db}):

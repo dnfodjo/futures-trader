@@ -117,10 +117,11 @@ class DatabentoClient:
     ) -> str | None:
         """Resolve the current front-month MNQ contract via Databento symbology.
 
-        Uses the continuous contract symbol ``MNQ.c.0`` (calendar-based front month)
-        which maps to whichever specific contract (e.g., MNQM6, MNQU6) the exchange
-        considers the active front month. This is the same logic Tradovate uses —
-        the roll happens when trading volume on the new contract surpasses the old.
+        Uses the parent symbol ``MNQ.FUT`` with ``stype_in="parent"`` to get all
+        active MNQ contract months, then picks the nearest expiration (front month).
+
+        MNQ contract months: H=Mar, M=Jun, U=Sep, Z=Dec.
+        Example: In March 2026, this returns "MNQM6" (June 2026 front month).
 
         Returns:
             The raw symbol string (e.g., "MNQM6") or None on error.
@@ -137,26 +138,40 @@ class DatabentoClient:
 
             resolution = client.symbology.resolve(
                 dataset=dataset,
-                symbols=["MNQ.c.0"],
-                stype_in="continuous",
+                symbols=["MNQ.FUT"],
+                stype_in="parent",
                 stype_out="raw_symbol",
                 start_date=today,
                 end_date=today,
             )
 
-            # Result format: {"MNQ.c.0": [{"d0": "...", "d1": "...", "s": "MNQM6"}]}
-            mappings = resolution.result.get("MNQ.c.0", [])
+            # Result format: {"MNQ.FUT": [{"d0": "2026-03-21", "d1": "2026-06-20", "s": "MNQM6"}, ...]}
+            # Each mapping has d0 (start), d1 (end/expiry), s (raw symbol).
+            # The front month is the contract with the NEAREST d1 (expiry) that
+            # is still in the future or is today.
+            mappings = resolution.result.get("MNQ.FUT", [])
             if not mappings:
                 logger.warning("databento.resolve_front_month_empty")
                 return None
 
-            raw_symbol = mappings[0].get("s") if isinstance(mappings[0], dict) else None
-            if raw_symbol:
-                logger.info(
-                    "databento.front_month_resolved",
-                    raw_symbol=raw_symbol,
-                )
-            return raw_symbol
+            # Pick the first mapping — Databento returns them in chronological
+            # order, so the first one with a valid symbol is the front month.
+            # Filter out any that don't have a symbol.
+            for m in mappings:
+                raw_symbol = m.get("s") if isinstance(m, dict) else None
+                if raw_symbol and raw_symbol.startswith("MNQ"):
+                    logger.info(
+                        "databento.front_month_resolved",
+                        raw_symbol=raw_symbol,
+                        expiry=m.get("d1", "unknown"),
+                    )
+                    return raw_symbol
+
+            logger.warning(
+                "databento.resolve_front_month_no_mnq",
+                mappings=str(mappings[:3]),
+            )
+            return None
 
         except Exception:
             logger.warning("databento.resolve_front_month_failed", exc_info=True)
