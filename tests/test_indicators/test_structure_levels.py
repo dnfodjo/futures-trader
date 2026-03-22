@@ -409,7 +409,7 @@ class TestCheckProximityBOS:
 
 class TestAntiSignalBlock:
     def test_short_blocked_at_daily_support(self):
-        """Shorting near a daily support zone should be blocked."""
+        """Shorting inside a daily support zone should be blocked."""
         mgr = StructureLevelManager()
         mgr.daily_atr = 250.0
         level = StructureLevel(
@@ -424,14 +424,35 @@ class TestAntiSignalBlock:
         )
         mgr._levels.append(level)
 
-        # Price near support, trying to short
-        price = 21220.0  # within 1.0 * daily_atr (250) of support
+        # Price inside support zone → blocked
+        price = 21205.0
         result = mgr.check_proximity(price, "short", [], [])
         assert result["blocked"] is True
         assert "support" in result["block_reason"].lower()
 
+    def test_short_not_blocked_far_from_support(self):
+        """Shorting far from support should NOT be blocked."""
+        mgr = StructureLevelManager()
+        mgr.daily_atr = 250.0
+        level = StructureLevel(
+            price=21200.0,
+            zone_high=21210.0,
+            zone_low=21200.0,
+            level_type="support",
+            timeframe="D",
+            timeframe_atr=250.0,
+            volume_confirmed=True,
+            created_at=datetime.now(tz=UTC),
+        )
+        mgr._levels.append(level)
+
+        # Price 50 pts above support zone → NOT blocked (outside 10pt buffer)
+        price = 21260.0
+        result = mgr.check_proximity(price, "short", [], [])
+        assert result["blocked"] is False
+
     def test_long_blocked_at_weekly_resistance(self):
-        """Longing near a weekly resistance zone should be blocked."""
+        """Longing inside a weekly resistance zone should be blocked."""
         mgr = StructureLevelManager()
         mgr.daily_atr = 250.0
         level = StructureLevel(
@@ -446,10 +467,32 @@ class TestAntiSignalBlock:
         )
         mgr._levels.append(level)
 
-        price = 21900.0  # within 1.0 * daily_atr (250) of resistance
+        # Price inside resistance zone → blocked
+        price = 21990.0
         result = mgr.check_proximity(price, "long", [], [])
         assert result["blocked"] is True
         assert "resistance" in result["block_reason"].lower()
+
+    def test_long_not_blocked_far_from_resistance(self):
+        """Longing far from resistance should NOT be blocked."""
+        mgr = StructureLevelManager()
+        mgr.daily_atr = 250.0
+        level = StructureLevel(
+            price=22000.0,
+            zone_high=22000.0,
+            zone_low=21980.0,
+            level_type="resistance",
+            timeframe="W",
+            timeframe_atr=500.0,
+            volume_confirmed=True,
+            created_at=datetime.now(tz=UTC),
+        )
+        mgr._levels.append(level)
+
+        # Price 80 pts below resistance zone → NOT blocked
+        price = 21900.0
+        result = mgr.check_proximity(price, "long", [], [])
+        assert result["blocked"] is False
 
     def test_no_block_for_1h_levels(self):
         """1h/4h levels should NOT trigger anti-signal blocks."""
@@ -1012,8 +1055,8 @@ class TestCreatedAtFromBar:
 
 
 class TestAntiSignalGracefulDegradation:
-    def test_no_block_when_daily_atr_zero(self):
-        """When daily_atr is 0, anti-signal should NOT block (graceful degradation)."""
+    def test_block_at_zone_edge_regardless_of_atr(self):
+        """Edge-based blocking works even when daily_atr is 0 (no ATR dependency)."""
         mgr = StructureLevelManager()
         mgr.daily_atr = 0.0  # No daily data available
         level = StructureLevel(
@@ -1023,5 +1066,21 @@ class TestAntiSignalGracefulDegradation:
         )
         mgr._levels.append(level)
 
+        # Price inside the zone → still blocked (edge-based, no ATR needed)
         result = mgr.check_proximity(21205.0, "short", [], [])
+        assert result["blocked"] is True
+
+    def test_no_block_far_from_zone_with_zero_atr(self):
+        """Price far from zone is NOT blocked, even with zero ATR."""
+        mgr = StructureLevelManager()
+        mgr.daily_atr = 0.0
+        level = StructureLevel(
+            price=21200.0, zone_high=21210.0, zone_low=21200.0,
+            level_type="support", timeframe="D", timeframe_atr=250.0,
+            volume_confirmed=True, created_at=datetime.now(tz=UTC),
+        )
+        mgr._levels.append(level)
+
+        # Price 50 pts above zone → not blocked
+        result = mgr.check_proximity(21260.0, "short", [], [])
         assert result["blocked"] is False

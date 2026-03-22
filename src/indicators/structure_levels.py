@@ -364,24 +364,25 @@ class StructureLevelManager:
             return empty_result
 
         # --- Anti-signal check (D/W only) ---
+        # Only block when price is RIGHT AT the opposing zone edge (within
+        # a small buffer).  The old approach blocked the entire zone + 1 ATR
+        # which created massive no-trade dead zones.  Now we use a tight
+        # buffer: 10 points from the zone edge.  Structure still scores 0
+        # when not near a supportive level — this just removes the hard block.
         blocked = False
         block_reason = ""
-        # If daily ATR is unavailable, skip anti-signal blocking entirely.
-        # A wrong ATR is worse than no blocking — graceful degradation contract.
-        anti_atr = self.daily_atr
+        EDGE_BUFFER = 10.0  # points from zone edge to trigger block
 
         for lv in active_levels:
-            if anti_atr <= 0:
-                break  # No daily ATR data → cannot compute proximity → skip blocking
             if lv.timeframe not in ANTI_SIGNAL_TIMEFRAMES:
                 continue
 
-            dist_to_zone = self._distance_to_zone(price, lv)
-
+            # For longs blocked by resistance: only block if price is
+            # within EDGE_BUFFER of the zone_low (approaching from below)
             if (
                 side == "long"
                 and lv.level_type == "resistance"
-                and dist_to_zone <= ANTI_SIGNAL_MULT * anti_atr
+                and lv.zone_low - EDGE_BUFFER <= price <= lv.zone_high + EDGE_BUFFER
             ):
                 blocked = True
                 block_reason = (
@@ -390,10 +391,12 @@ class StructureLevelManager:
                 )
                 break
 
+            # For shorts blocked by support: only block if price is
+            # within EDGE_BUFFER of the zone_high (approaching from above)
             if (
                 side == "short"
                 and lv.level_type == "support"
-                and dist_to_zone <= ANTI_SIGNAL_MULT * anti_atr
+                and lv.zone_low - EDGE_BUFFER <= price <= lv.zone_high + EDGE_BUFFER
             ):
                 blocked = True
                 block_reason = (
