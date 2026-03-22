@@ -294,6 +294,7 @@ class ConfluenceEngine:
             side=side,
             score=total_score,
             blocked=blocked,
+            block_reason=block_reason or "",
             speed=speed_state,
             factors={k: v["score"] for k, v in factors.items()},
         )
