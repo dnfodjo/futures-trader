@@ -1251,7 +1251,13 @@ class DatabentoClient:
             client = db.Historical(key=api_key)
 
             # Date calculation with weekend buffer (matches compute_rvol_baseline pattern)
-            end_date = datetime.now(tz=UTC)
+            # For daily/weekly schemas, Databento only has data through yesterday
+            # (today's bar isn't complete). Use yesterday as end date for those.
+            now = datetime.now(tz=UTC)
+            if schema in ("ohlcv-1d",):
+                end_date = now - timedelta(days=1)
+            else:
+                end_date = now
             start_date = end_date - timedelta(days=int(lookback_days * 1.5 + 5))
 
             with warnings.catch_warnings():
