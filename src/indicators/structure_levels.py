@@ -363,14 +363,42 @@ class StructureLevelManager:
         if not active_levels:
             return empty_result
 
-        # --- Anti-signal: info only, no hard block ---
-        # Structure scores 0 when not near a supportive level, which
-        # naturally depresses the confluence score.  Hard-blocking was
-        # too aggressive — D/W zones can be 500+ pts wide on MNQ,
-        # creating massive no-trade dead zones.  Now we just log the
-        # proximity info for analysis.
+        # --- Anti-signal: block only when APPROACHING a zone edge (D/W) ---
+        # The block only fires when price is near the edge it would hit:
+        #   - Long approaching resistance from below → block near zone_low
+        #   - Short approaching support from above → block near zone_high
+        # Breakouts (price above resistance top / below support bottom)
+        # are GOOD — that's BOS, don't block.
+        # Deep inside a wide zone = no block (let confluence decide).
         blocked = False
         block_reason = ""
+        EDGE_BUFFER = 15.0  # points from the approaching edge
+
+        for lv in active_levels:
+            if lv.timeframe not in ANTI_SIGNAL_TIMEFRAMES:
+                continue
+
+            # Long vs resistance: block only when approaching from below
+            # (price near zone_low). If price > zone_high, that's a breakout.
+            if side == "long" and lv.level_type == "resistance":
+                if price < lv.zone_high and abs(price - lv.zone_low) <= EDGE_BUFFER:
+                    blocked = True
+                    block_reason = (
+                        f"long blocked: approaching {lv.timeframe} resistance at "
+                        f"{lv.zone_low:.0f}-{lv.zone_high:.0f}"
+                    )
+                    break
+
+            # Short vs support: block only when approaching from above
+            # (price near zone_high). If price < zone_low, that's a breakdown.
+            if side == "short" and lv.level_type == "support":
+                if price > lv.zone_low and abs(price - lv.zone_high) <= EDGE_BUFFER:
+                    blocked = True
+                    block_reason = (
+                        f"short blocked: approaching {lv.timeframe} support at "
+                        f"{lv.zone_low:.0f}-{lv.zone_high:.0f}"
+                    )
+                    break
 
         # --- Side-aware filtering ---
         # For bounce: long looks at support, short looks at resistance
