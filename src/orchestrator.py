@@ -830,6 +830,10 @@ class TradingOrchestrator:
             recent_vol = sum(b.get("volume", 0) for b in bars[-5:]) / 5
             volume_sufficient = recent_vol >= avg_vol
 
+        # Extract structure score from best result factors
+        best_factors = best_result.get("factors", {})
+        structure_score = best_factors.get("structure", {}).get("score", 0)
+
         # Run all hard gates
         entry_allowed, block_reason = self._risk_manager.check_entry_allowed(
             phase=phase,
@@ -841,6 +845,7 @@ class TradingOrchestrator:
             speed_state=best_result.get("speed_state", "NORMAL"),
             trend_30m_agrees=trend_30m_agrees,
             volume_sufficient=volume_sufficient,
+            structure_score=structure_score,
         )
 
         if not entry_allowed:

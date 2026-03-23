@@ -235,6 +235,7 @@ class RiskManager:
         speed_state: str,
         trend_30m_agrees: bool,
         volume_sufficient: bool,
+        structure_score: int = 0,
     ) -> tuple[bool, str]:
         """Check whether a new entry is allowed.
 
@@ -291,7 +292,12 @@ class RiskManager:
         # can happen while EMA9 is still below EMA50.  The confluence score
         # threshold is the real protection: without trend points you need
         # stronger setup from other factors.
-        if not trend_30m_agrees and speed_state.upper() != "FAST":
+        #
+        # EXCEPTION: HTF structure bounce (D/W level) overrides trend block.
+        # At major reversal points the 30m trend is EXPECTED to disagree —
+        # that's what makes it a reversal.  The structure factor already
+        # requires volume confirmation + candle rejection.
+        if not trend_30m_agrees and speed_state.upper() != "FAST" and structure_score < 2:
             return False, "TREND_DISAGREE: 30m trend against signal direction"
 
         # 9. Insufficient volume
