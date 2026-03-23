@@ -185,6 +185,11 @@ class ConfluenceEngine:
             dict with keys: ``score``, ``speed_state``, ``blocked``,
             ``block_reason``, ``factors``, ``risk_flags``.
         """
+        # Fallback: if last_price is 0 (no live ticks yet after restart),
+        # use the last bar's close so all factors get a real price.
+        if last_price <= 0 and bars_1m:
+            last_price = bars_1m[-1].get("close", 0.0)
+
         risk_flags: list[str] = []
         factors: dict[str, dict] = {}
         blocked = False
