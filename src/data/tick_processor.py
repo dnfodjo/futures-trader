@@ -178,6 +178,7 @@ class TickProcessor:
                     price=trade.price,
                     session_close=self._session.session_close,
                     total_trades=self._session.total_trades,
+                    session_id=id(self._session),
                 )
 
             # Update volume profile
