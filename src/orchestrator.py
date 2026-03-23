@@ -773,8 +773,7 @@ class TradingOrchestrator:
             bars_5m = state.multi_tf_bars.get("5m", [])
 
         # Try both directions — check which side has better confluence
-        best_score = None
-        best_side = None
+        results: dict[str, dict] = {}
 
         for side_str in ("long", "short"):
             score_result = self._confluence_engine.score(
@@ -787,14 +786,54 @@ class TradingOrchestrator:
                 bars_5m=bars_5m,
             )
 
-            if score_result.get("blocked"):
-                continue
+            if not score_result.get("blocked"):
+                results[side_str] = score_result
 
-            score_val = score_result.get("score", 0)
-            if best_score is None or score_val > best_score:
-                best_score = score_val
-                best_side = side_str
-                best_result = score_result
+        if not results:
+            return  # No confluence on either side
+
+        # ── Trend-aware side selection ────────────────────────────────
+        # Rule: trend is the tiebreaker. Going against trend requires
+        # score to be at least 2 points higher. This prevents buying
+        # into waterfalls where OB+candle+volume fire but trend is down.
+        long_result = results.get("long")
+        short_result = results.get("short")
+        long_score = long_result.get("score", 0) if long_result else 0
+        short_score = short_result.get("score", 0) if short_result else 0
+
+        long_has_trend = bool(
+            long_result and long_result.get("factors", {}).get("trend", {}).get("score", 0) > 0
+        )
+        short_has_trend = bool(
+            short_result and short_result.get("factors", {}).get("trend", {}).get("score", 0) > 0
+        )
+
+        # Apply trend advantage: the trending side gets +2 effective score for comparison
+        long_effective = long_score + (2 if long_has_trend and not short_has_trend else 0)
+        short_effective = short_score + (2 if short_has_trend and not long_has_trend else 0)
+
+        if long_effective >= short_effective and long_result:
+            best_score = long_score
+            best_side = "long"
+            best_result = long_result
+        elif short_result:
+            best_score = short_score
+            best_side = "short"
+            best_result = short_result
+        else:
+            return
+
+        # Log if trend override changed the selection
+        if long_has_trend != short_has_trend:
+            trending_side = "long" if long_has_trend else "short"
+            if best_side != trending_side and best_score > 0:
+                logger.info(
+                    "confluence.counter_trend_entry",
+                    best_side=best_side,
+                    best_score=best_score,
+                    trending_side=trending_side,
+                    msg=f"Entering {best_side} against {trending_side} trend (score advantage overcame +2 trend bonus)",
+                )
 
         if best_score is None or best_side is None:
             return  # No confluence on either side
@@ -825,6 +864,24 @@ class TradingOrchestrator:
         # Check if confluence meets session minimum
         if best_score < min_confluence:
             return  # Below threshold
+
+        # ── Trend requirement: entries without trend need higher conviction ──
+        # If the winning side has trend=0, require score to be at least
+        # min_confluence + 2. This prevents OB+candle+volume entries into
+        # waterfalls where trend hasn't confirmed direction.
+        winning_has_trend = (
+            (best_side == "long" and long_has_trend)
+            or (best_side == "short" and short_has_trend)
+        )
+        if not winning_has_trend:
+            no_trend_min = min_confluence + 2  # e.g. 3 + 2 = 5
+            if best_score < no_trend_min:
+                logger.info(
+                    "confluence.entry_blocked",
+                    reason=f"NO_TREND: score {best_score} < {no_trend_min} required without trend confirmation",
+                    score=best_score,
+                )
+                return
 
         # 30m trend agreement — computed here and passed to risk manager
         # which decides whether to hard-block based on speed state.
