@@ -169,6 +169,13 @@ class TickProcessor:
 
             # Update session data
             self._session.update_from_trade(trade)
+            if self._session.total_trades <= 3:
+                logger.info(
+                    "tick_processor.trade_processed",
+                    price=trade.price,
+                    session_close=self._session.session_close,
+                    total_trades=self._session.total_trades,
+                )
 
             # Update volume profile
             self._volume_profile.add_volume(trade.price, trade.size)
