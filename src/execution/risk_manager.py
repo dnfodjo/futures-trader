@@ -372,9 +372,11 @@ class RiskManager:
             if minutes_left <= 5:
                 reasons.append(f"SESSION_BOUNDARY: {minutes_left}min to RTH close, must exit")
 
-        # 3. Entropy spiking - conditions too choppy to hold
-        if entropy > 0.85:
-            reasons.append(f"HIGH_ENTROPY: {entropy:.3f} > 0.85, conditions too random")
+        # 3. Entropy — entry gate only, NOT an exit trigger.
+        # The trailing stop manages position exits.  Entropy during a trade
+        # is normal on thin sessions (Asian/weekend) and would cut winners
+        # short.  Entry already passed the entropy gate, so trust the setup.
+        # (entropy check retained at entry in check_entry_allowed)
 
         # If we accumulated any advisory reasons, return the first critical one
         # (non-daily-loss reasons are strong suggestions but the orchestrator

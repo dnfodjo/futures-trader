@@ -280,17 +280,12 @@ class TestWiderTrailParams:
 class TestEntropyCooldown:
     """Entropy/mechanical exits should be skipped if position < 120 seconds old."""
 
-    def test_entropy_exit_skipped_within_120s(self):
-        """When position is < 120s old, entropy exit should be suppressed."""
-        # This tests the orchestrator logic. We verify the pattern:
-        # if time.monotonic() - self._last_entry_time < 120: skip entropy exit
-        # We test this by checking that the orchestrator has the cooldown check.
-        # The actual integration test would require the full orchestrator,
-        # so we test the risk_manager + orchestrator interaction pattern.
+    def test_entropy_no_longer_triggers_exit(self):
+        """Entropy is entry-gate only — should NOT trigger exits."""
         from src.execution.risk_manager import RiskManager
 
         rm = RiskManager()
-        # Entropy > 0.85 should suggest exit
+        # Entropy > 0.85 should NOT suggest exit anymore
         should_exit, reason = rm.check_exit_needed(
             phase=None,  # type: ignore
             daily_pnl=0.0,
@@ -299,9 +294,8 @@ class TestEntropyCooldown:
             delta_against_minutes=0,
             absorption_against=False,
         )
-        # Risk manager DOES suggest exit (it doesn't know about cooldown)
-        assert should_exit
-        assert "HIGH_ENTROPY" in reason
+        assert not should_exit
+        assert reason == "HOLD"
 
     def test_daily_loss_always_triggers(self):
         """Daily loss limit should never be cooldown-gated."""
