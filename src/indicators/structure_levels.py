@@ -526,12 +526,20 @@ class StructureLevelManager:
         IMPORTANT: `price` should be a candle CLOSE, not a tick price.
         Wicks through zones must not trigger BOS.
 
+        GUARD: Skip entirely if price is 0 or invalid — avoids mass-flipping
+        all levels when no live ticks have arrived after a restart.
+
         For each unbroken level:
           - Resistance: if close > zone_high AND volume > 1.5 * avg_volume
             => mark broken, create flipped support level
           - Support: if close < zone_low AND volume > 1.5 * avg_volume
             => mark broken, create flipped resistance level
         """
+        # Guard: skip if price is invalid — avoids mass-flipping all levels
+        # when price=0 after a restart with no live ticks
+        if price <= 0 or price < 5000:
+            return
+
         if volume <= 0 or avg_volume <= 0:
             logger.debug(
                 "structure_levels.update_breaks_skipped",

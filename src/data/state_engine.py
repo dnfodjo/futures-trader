@@ -1452,6 +1452,25 @@ class StateEngine:
                 self._1min_bar_start = ts
         self._current_1min_bar = None  # force new bar on next tick
 
+        # Set last_price from the most recent bar close so all systems
+        # (confluence scoring, structure levels, etc.) have a valid price
+        # immediately after startup — not 0.0 waiting for the first live tick.
+        last_close = last_bar.get("close", 0.0)
+        if last_close > 0:
+            # Seed the tick processor's last price so all systems
+            # (confluence, structure, debug_state) see a valid price
+            # immediately — not 0.0 waiting for first live tick.
+            try:
+                if hasattr(self._tick_processor, "_last_price") and self._tick_processor._last_price <= 0:
+                    self._tick_processor._last_price = last_close
+                    logger.info(
+                        "state_engine.last_price_from_warmup",
+                        price=last_close,
+                        msg="Set last_price from historical bar close",
+                    )
+            except (TypeError, AttributeError):
+                pass  # tick_processor may be mocked in tests
+
         # Warm the confluence engine with historical bars so it detects
         # order blocks, pivots, and sweep levels from existing data.
         if self._confluence_engine is not None and len(self._1min_bars) >= 15:
