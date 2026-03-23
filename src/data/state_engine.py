@@ -846,6 +846,15 @@ class StateEngine:
         async with self._lock:
             # 1. Pull tick processor snapshot
             tick_snap = self._tick_processor.snapshot()
+            if tick_snap["last_price"] <= 0:
+                logger.info(
+                    "state_engine.snapshot_zero_price",
+                    tick_processor_id=id(self._tick_processor),
+                    session_id=id(self._tick_processor._session),
+                    session_close=self._tick_processor._session.session_close,
+                    total_trades=self._tick_processor._session.total_trades,
+                    snap_price=tick_snap["last_price"],
+                )
 
             # 2. Pull cross-market context
             cross_market = self._multi_instrument.snapshot()
