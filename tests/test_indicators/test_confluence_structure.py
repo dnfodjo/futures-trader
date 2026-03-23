@@ -257,7 +257,7 @@ class TestScoreIntegration:
             bars_5m=[],
         )
         assert "structure" in result["factors"]
-        assert result["factors"]["structure"]["score"] == 2  # D bounce
+        assert result["factors"]["structure"]["score"] == 0  # Structure disabled
 
     def test_structure_block_propagates_to_result(self):
         """Structure block should propagate to top-level blocked flag."""
