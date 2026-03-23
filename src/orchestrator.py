@@ -217,6 +217,7 @@ class TradingOrchestrator:
         self._trail_updates: int = 0
         self._cycle_count: int = 0
         self._errors: int = 0
+        self._last_score_time: float = 0.0  # monotonic timestamp of last successful score
 
         # Post-trade thesis tracking: monitor price after exit to see
         # if the directional thesis was correct (helps LLM learn intra-session)
@@ -604,6 +605,19 @@ class TradingOrchestrator:
 
             self._cycle_count += 1
 
+            # ── Scoring watchdog: detect stalled scoring loop ─────────
+            if (self._last_score_time > 0
+                    and time.monotonic() - self._last_score_time > 120
+                    and self._cycle_count > 5):
+                logger.error(
+                    "orchestrator.scoring_watchdog_triggered",
+                    last_score_age_sec=round(time.monotonic() - self._last_score_time, 1),
+                    cycle=self._cycle_count,
+                )
+                # Force shutdown — systemd will restart us with a clean state
+                self._shutdown_event.set()
+                break
+
             # Adaptive sleep based on position state
             sleep_sec = self._get_cycle_interval()
             try:
@@ -844,6 +858,9 @@ class TradingOrchestrator:
 
             if not score_result.get("blocked"):
                 results[side_str] = score_result
+
+        # ── Watchdog: mark successful score time ─────────────────────
+        self._last_score_time = time.monotonic()
 
         if not results:
             return  # No confluence on either side
