@@ -477,10 +477,13 @@ class TradingOrchestrator:
 
         # 4. Live trading loop
         self._state = OrchestratorState.LIVE_TRADING
-        # Reset tick processor VWAP/delta/volume for RTH session so
-        # metrics are not polluted by overnight/pre-market data
-        if self._rth_reset_fn:
-            self._rth_reset_fn()
+        # NOTE: reset_for_rth is NOT called on startup.  The historical
+        # warmup already provides clean session data.  Calling reset here
+        # wipes the live price (session_close) which causes stale-price
+        # entries during thin sessions.  Reset only at the actual daily
+        # session boundary (handled by the session date change detector).
+        # if self._rth_reset_fn:
+        #     self._rth_reset_fn()
         # Reset risk manager daily state (trade counts, shutdown flag, cooldown)
         if self._risk_manager:
             self._risk_manager.reset_daily()

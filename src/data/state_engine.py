@@ -1399,20 +1399,7 @@ class StateEngine:
         overnight/pre-market data.  Prior day, overnight levels,
         and pivot levels are preserved.
         """
-        # Preserve the live price across reset — session_close is the
-        # running last-traded price, not "session closing price".  Zeroing
-        # it forces the system to wait for a new tick, which can take
-        # minutes during thin sessions (Asian/weekend).
-        try:
-            live_price = self._tick_processor._session.session_close
-        except (TypeError, AttributeError):
-            live_price = 0.0
         self._tick_processor.reset()
-        try:
-            if isinstance(live_price, (int, float)) and live_price > 0:
-                self._tick_processor._session.session_close = live_price
-        except (TypeError, AttributeError):
-            pass
         self._recent_bars.clear()
         # Clear 1-min bars and opening range for fresh RTH computation
         self._1min_bars.clear()
