@@ -146,12 +146,12 @@ class TradingConfig(BaseSettings):
     # give back all profits. Asian moves are 8-15pts, London 10-20pts.
     # Trail = 6pts means we keep 2-14pts of an 8-20pt move (vs 0-7pts with 5pt trail).
     # Initial stop at 6pts risks $24/trade (2 contracts) — acceptable.
-    eth_trail_distance: float = 8.0  # was 6 — wider trail to survive normal pullbacks
-    eth_trail_activation_points: float = 6.0  # was 3 — don't trail until real profit
-    eth_mid_tighten_at_profit: float = 12.0  # was 6 — tighten later, not immediately
-    eth_mid_tightened_distance: float = 6.0  # was 5 — still give room at mid profit
-    eth_tighten_at_profit: float = 18.0  # was 10 — only tight trail on big winners
-    eth_tightened_distance: float = 5.0  # was 4 — don't choke big winners
+    eth_trail_distance: float = 15.0  # wider trail — MNQ needs room to breathe
+    eth_trail_activation_points: float = 20.0  # don't trail until +20pts of real profit
+    eth_mid_tighten_at_profit: float = 30.0  # tighten at +30pts, not +12
+    eth_mid_tightened_distance: float = 12.0  # still give room at mid profit
+    eth_tighten_at_profit: float = 50.0  # only tight trail on big winners (+50pts)
+    eth_tightened_distance: float = 8.0  # don't choke big winners
     eth_max_stop_points: float = 12.0  # max 12pt stop during ETH (vs 25pt RTH)
 
     # Stop hunt avoidance
