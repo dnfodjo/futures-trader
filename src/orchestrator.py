@@ -669,14 +669,65 @@ class TradingOrchestrator:
             self._last_state = state
 
         # 5. Detect if tick_stop_monitor already flattened us
+        #    The tick_stop_monitor calls quantlynk.flatten() directly,
+        #    bypassing the position tracker.  We must sync the tracker here
+        #    so the orchestrator knows the position is closed.
         if (
             self._tick_stop_monitor
             and self._tick_stop_monitor.is_triggered
-            and position is None
         ):
             reason = self._tick_stop_monitor.trigger_reason
-            logger.info("confluence.tick_stop_flatten_detected", reason=reason)
+            logger.info("confluence.tick_stop_flatten_detected", reason=reason,
+                        position_was=position.side.value if position else "None")
+
+            # Sync position tracker — the flatten already happened on Tradovate
+            if position is not None and self._position_tracker:
+                exit_price = self._tick_stop_monitor._trigger_price or state.last_price
+                entry_price = self._tick_stop_monitor._entry_price or 0.0
+                side = self._tick_stop_monitor._side or "long"
+
+                # Compute PnL from tick stop monitor's known prices
+                if side == "long":
+                    pnl_pts = exit_price - entry_price
+                else:
+                    pnl_pts = entry_price - exit_price
+                pnl_est = pnl_pts * position.quantity * 2.0  # $2/pt for MNQ
+
+                # Reset position tracker — position is already flat on Tradovate
+                self._position_tracker.reset()
+                position = None  # Update local reference
+
+                logger.info("confluence.position_tracker_synced",
+                            exit_price=exit_price, entry_price=entry_price,
+                            pnl_est=round(pnl_est, 2), reason=reason)
+
+                # Record win/loss for cooldown
+                self._last_exit_time = time.monotonic()
+                self._last_exit_was_loss = pnl_est < 0
+                if pnl_est < 0 and self._risk_manager:
+                    self._risk_manager.record_loss(datetime.now(tz=UTC))
+
             self._tick_stop_monitor.deactivate()
+
+        # 5b. Watchdog: if position tracker says we're in a trade but
+        #     tick_stop_monitor is inactive (not monitoring), the position
+        #     is stale — force reset after 5 minutes of being stuck.
+        if (
+            position is not None
+            and self._tick_stop_monitor
+            and not self._tick_stop_monitor._active
+            and not self._tick_stop_monitor._triggered
+        ):
+            stuck_duration = time.monotonic() - self._last_entry_time
+            if stuck_duration > 300:  # 5 minutes
+                logger.warning(
+                    "confluence.watchdog_position_reset",
+                    stuck_sec=round(stuck_duration, 0),
+                    msg="Position tracker stuck — tick_stop_monitor inactive. Forcing reset.",
+                )
+                self._position_tracker.reset()
+                position = None
+                self._last_exit_time = time.monotonic()
 
         phase = state.session_phase
         daily_pnl = self._session_ctrl.daily_pnl
