@@ -428,7 +428,7 @@ class StructureLevelManager:
                 closest = min(side_levels, key=lambda lv: self._distance_to_zone(price, lv))
                 closest_dist = self._distance_to_zone(price, closest)
                 closest_thresh = PROXIMITY_MULT.get(closest.timeframe, 1.0) * closest.timeframe_atr
-                logger.debug(
+                logger.info(
                     "structure_levels.nearest_level",
                     side=side,
                     price=round(price, 2),
