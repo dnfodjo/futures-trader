@@ -259,8 +259,8 @@ class TestScoreIntegration:
         assert "structure" in result["factors"]
         assert result["factors"]["structure"]["score"] == 0  # Structure disabled
 
-    def test_structure_block_propagates_to_result(self):
-        """Structure block should propagate to top-level blocked flag."""
+    def test_structure_block_ignored_when_disabled(self):
+        """Structure block should NOT propagate when structure is disabled."""
         mgr = MagicMock()
         mgr.check_proximity.return_value = {
             "bounce_score": 0,
@@ -281,7 +281,8 @@ class TestScoreIntegration:
             session_levels=_make_session_levels(),
             bars_5m=[],
         )
-        assert result["blocked"] is True
+        # Structure is disabled — block should not propagate
+        assert result["blocked"] is False
 
     def test_structure_suppressed_when_core_below_2(self):
         """Structure points should NOT count if core factor score < 2."""

@@ -307,6 +307,7 @@ def _build_components(config: AppConfig, dry_run: bool = False) -> dict:
             default_stop_distance=10.0,
             point_value=trading.point_value,
             position_tracker=position_tracker,
+            tick_processor=tick_processor,
         )
 
     else:

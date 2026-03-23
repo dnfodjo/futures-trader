@@ -57,6 +57,7 @@ class QuantLynkOrderManager:
         default_stop_distance: float = 12.0,
         point_value: float = 2.0,
         position_tracker: Optional[Any] = None,
+        tick_processor: Optional[Any] = None,
     ) -> None:
         self._client = client
         self._bus = event_bus
@@ -64,6 +65,7 @@ class QuantLynkOrderManager:
         self._default_stop_distance = default_stop_distance
         self._point_value = point_value
         self._position_tracker = position_tracker
+        self._tick_processor = tick_processor
 
         # Internal position tracking (since we don't get fills back from QuantLynk)
         self._current_stop_price: Optional[float] = None
@@ -84,6 +86,19 @@ class QuantLynkOrderManager:
     @property
     def simulation_mode(self) -> bool:
         return self._simulation_mode
+
+    def _get_live_price(self, fallback: float) -> float:
+        """Get the latest tick price from the tick processor.
+
+        Falls back to the snapshot price if tick processor is unavailable.
+        This ensures stops, trails, and PnL are based on real-time prices
+        rather than stale bar-close prices from the scoring snapshot.
+        """
+        if self._tick_processor is not None:
+            live = self._tick_processor.last_price
+            if live > 0:
+                return live
+        return fallback
 
     async def execute(
         self,
@@ -198,16 +213,31 @@ class QuantLynkOrderManager:
 
         quantity = action.quantity or 1
 
+        # Use real-time tick price for execution, not stale snapshot
+        live_price = self._get_live_price(last_price)
+
         # Send buy or sell to QuantLynk
         if side == Side.LONG:
-            result = await self._client.buy(quantity=quantity, price=last_price)
+            result = await self._client.buy(quantity=quantity, price=live_price)
         else:
-            result = await self._client.sell(quantity=quantity, price=last_price)
+            result = await self._client.sell(quantity=quantity, price=live_price)
+
+        # Re-read price AFTER webhook returns — closest to actual fill
+        fill_price = self._get_live_price(live_price)
 
         self._orders_placed += 1
         self._orders_filled += 1  # assume filled (market order)
 
-        # Calculate stop price (managed locally, not by QuantLynk)
+        if live_price != last_price:
+            logger.info(
+                "quantlynk_om.price_corrected",
+                snapshot_price=last_price,
+                live_price=live_price,
+                fill_price=fill_price,
+                diff=round(fill_price - last_price, 2),
+            )
+
+        # Calculate stop price from fill price (not stale snapshot)
         # Enforce minimum stop distance of 15 points — 10pt stops get hunted
         # on every trade because MNQ's normal noise exceeds 10pts
         min_stop_distance = 15.0
@@ -220,19 +250,19 @@ class QuantLynkOrderManager:
                 enforced=stop_distance,
             )
         if side == Side.LONG:
-            self._current_stop_price = round(last_price - stop_distance, 2)
+            self._current_stop_price = round(fill_price - stop_distance, 2)
         else:
-            self._current_stop_price = round(last_price + stop_distance, 2)
+            self._current_stop_price = round(fill_price + stop_distance, 2)
 
-        # Sync fill to position tracker
+        # Sync fill to position tracker with fill price
         fill_action = "Buy" if side == Side.LONG else "Sell"
-        await self._sync_fill(fill_action, quantity, last_price)
+        await self._sync_fill(fill_action, quantity, fill_price)
 
         logger.info(
             "quantlynk_om.enter",
             side=side.value,
             qty=quantity,
-            price=last_price,
+            price=fill_price,
             stop=self._current_stop_price,
         )
 
@@ -321,18 +351,24 @@ class QuantLynkOrderManager:
 
         quantity = action.quantity or 1
 
+        # Use real-time price for partial exit
+        live_price = self._get_live_price(last_price)
+
         # Opposite side to close partial
         if position.side == Side.LONG:
-            result = await self._client.sell(quantity=quantity, price=last_price)
+            result = await self._client.sell(quantity=quantity, price=live_price)
         else:
-            result = await self._client.buy(quantity=quantity, price=last_price)
+            result = await self._client.buy(quantity=quantity, price=live_price)
+
+        # Re-read after webhook
+        fill_price = self._get_live_price(live_price)
 
         self._orders_placed += 1
         self._orders_filled += 1
 
         # Sync fill to position tracker (opposite side = reduce/close)
         fill_action = "Sell" if position.side == Side.LONG else "Buy"
-        await self._sync_fill(fill_action, quantity, last_price)
+        await self._sync_fill(fill_action, quantity, fill_price)
 
         logger.info(
             "quantlynk_om.scale_out",
@@ -399,7 +435,13 @@ class QuantLynkOrderManager:
         # Get position info BEFORE flatten for fill sync
         pos = self._position_tracker.position if self._position_tracker else None
 
-        result = await self._client.flatten(price=last_price)
+        # Use real-time price for flatten
+        live_price = self._get_live_price(last_price)
+
+        result = await self._client.flatten(price=live_price)
+
+        # Re-read after webhook for closest-to-fill price
+        fill_price = self._get_live_price(live_price)
 
         self._orders_placed += 1
         self._orders_filled += 1
@@ -408,9 +450,9 @@ class QuantLynkOrderManager:
         # Sync fill to position tracker (opposite side closes position)
         if pos is not None:
             fill_action = "Sell" if pos.side == Side.LONG else "Buy"
-            await self._sync_fill(fill_action, pos.quantity, last_price)
+            await self._sync_fill(fill_action, pos.quantity, fill_price)
 
-        logger.info("quantlynk_om.flatten", price=last_price)
+        logger.info("quantlynk_om.flatten", price=fill_price, snapshot_price=last_price)
 
         self._bus.publish_nowait(Event(
             type=EventType.ORDER_PLACED,
