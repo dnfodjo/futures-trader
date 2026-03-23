@@ -241,6 +241,11 @@ class TradingOrchestrator:
         self._trades_this_hour: int = 0  # entries in current clock hour
         self._current_hour: int = -1  # track hour for reset
 
+        # No-trend confirmation delay — wait 90s for score to hold before entering
+        self._no_trend_confirm_side: Optional[str] = None
+        self._no_trend_confirm_score: int = 0
+        self._no_trend_confirm_start: float = 0.0
+
         # Tasks
         self._tasks: list[asyncio.Task] = []
 
@@ -865,23 +870,77 @@ class TradingOrchestrator:
         if best_score < min_confluence:
             return  # Below threshold
 
-        # ── Trend requirement: entries without trend need higher conviction ──
-        # If the winning side has trend=0, require score to be at least
-        # min_confluence + 2. This prevents OB+candle+volume entries into
-        # waterfalls where trend hasn't confirmed direction.
+        # ── No-trend confirmation delay ──────────────────────────────
+        # When trend=0 on the winning side, don't enter immediately.
+        # Wait 90-120s of sustained scoring to confirm it's a real
+        # setup and not a trap (dead cat bounce in a waterfall).
+        # With trend: enter immediately. Without: wait for confirmation.
         winning_has_trend = (
             (best_side == "long" and long_has_trend)
             or (best_side == "short" and short_has_trend)
         )
         if not winning_has_trend:
-            no_trend_min = min_confluence + 2  # e.g. 3 + 2 = 5
-            if best_score < no_trend_min:
+            now_mono = time.monotonic()
+            # Check if we have an active confirmation timer for this side
+            if (
+                self._no_trend_confirm_side != best_side
+                or self._no_trend_confirm_score == 0
+            ):
+                # New setup or side changed — start confirmation timer
+                self._no_trend_confirm_side = best_side
+                self._no_trend_confirm_score = best_score
+                self._no_trend_confirm_start = now_mono
                 logger.info(
-                    "confluence.entry_blocked",
-                    reason=f"NO_TREND: score {best_score} < {no_trend_min} required without trend confirmation",
+                    "confluence.no_trend_confirmation_started",
+                    side=best_side,
                     score=best_score,
+                    required_sec=90,
+                )
+                return  # Don't enter yet — wait for confirmation
+
+            # Timer is running — check if score dropped
+            if best_score < min_confluence:
+                # Score dropped below threshold — cancel confirmation
+                self._no_trend_confirm_side = None
+                self._no_trend_confirm_score = 0
+                self._no_trend_confirm_start = 0.0
+                logger.info(
+                    "confluence.no_trend_confirmation_cancelled",
+                    side=best_side,
+                    score=best_score,
+                    reason="score_dropped",
                 )
                 return
+
+            # Check if enough time has passed (90 seconds)
+            elapsed = now_mono - self._no_trend_confirm_start
+            if elapsed < 90.0:
+                logger.info(
+                    "confluence.no_trend_confirmation_waiting",
+                    side=best_side,
+                    score=best_score,
+                    elapsed_sec=round(elapsed, 0),
+                    remaining_sec=round(90.0 - elapsed, 0),
+                )
+                return  # Still waiting
+
+            # Confirmation passed — score held for 90+ seconds, allow entry
+            logger.info(
+                "confluence.no_trend_confirmation_passed",
+                side=best_side,
+                score=best_score,
+                elapsed_sec=round(elapsed, 0),
+            )
+            # Reset timer
+            self._no_trend_confirm_side = None
+            self._no_trend_confirm_score = 0
+            self._no_trend_confirm_start = 0.0
+        else:
+            # Has trend — reset any pending no-trend confirmation
+            if self._no_trend_confirm_side is not None:
+                self._no_trend_confirm_side = None
+                self._no_trend_confirm_score = 0
+                self._no_trend_confirm_start = 0.0
 
         # 30m trend agreement — computed here and passed to risk manager
         # which decides whether to hard-block based on speed state.
