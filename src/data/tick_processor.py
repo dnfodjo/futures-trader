@@ -410,6 +410,16 @@ class TickProcessor:
         vp = self._volume_profile
         va_low, va_high = vp.value_area()
 
+        if self._session.session_close > 0 and self._session.total_trades > 0:
+            pass  # Normal: live ticks flowing
+        else:
+            logger.info(
+                "tick_processor.snapshot_price_debug",
+                session_close=self._session.session_close,
+                total_trades=self._session.total_trades,
+                session_id=id(self._session),
+            )
+
         return {
             # Price
             "last_price": self._session.session_close,
