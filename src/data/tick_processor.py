@@ -147,11 +147,8 @@ class TickProcessor:
             )
             self._symbol_accepted_logged = True
 
-        logger.info("tick_processor.PRE_LOCK", price=data.get("price"), lock_locked=self._lock.locked())
-
         async with self._lock:
             now_mono = time.monotonic()
-            logger.info("tick_processor.IN_LOCK", price=data.get("price"))
 
             # Parse direction
             dir_str = data.get("direction", "unknown")
