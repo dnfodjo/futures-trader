@@ -1456,21 +1456,11 @@ class StateEngine:
         # (confluence scoring, structure levels, etc.) have a valid price
         # immediately after startup — not 0.0 waiting for the first live tick.
         last_close = last_bar.get("close", 0.0)
-        if last_close > 0:
-            # Seed the tick processor's session_close so all systems
-            # (confluence, structure, debug_state) see a valid price
-            # immediately — not 0.0 waiting for first live tick.
-            try:
-                session = getattr(self._tick_processor, "_session", None)
-                if session is not None and getattr(session, "session_close", 0.0) <= 0:
-                    session.session_close = last_close
-                    logger.info(
-                        "state_engine.last_price_from_warmup",
-                        price=last_close,
-                        msg="Set last_price from historical bar close",
-                    )
-            except (TypeError, AttributeError):
-                pass  # tick_processor may be mocked in tests
+        # NOTE: We intentionally do NOT set session_close from warmup bars.
+        # session_close must only be updated by live ticks to ensure the
+        # system trades at the actual market price, not stale historical data.
+        # The confluence fallback (bar close when last_price=0) handles
+        # scoring until the first live tick arrives.
 
         # Warm the confluence engine with historical bars so it detects
         # order blocks, pivots, and sweep levels from existing data.
