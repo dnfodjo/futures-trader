@@ -863,15 +863,14 @@ class TestPerLevelATR:
         )
         mgr._levels.append(level_d)
 
-        # Price 100 pts away => inside D threshold (250)
+        # Price 20 pts away => inside D fixed threshold (25pts)
         # But need rejection bars for bounce
         bars_1m = [
             _make_rejection_bar_1m(21210.0, 21200.0, "long"),
             _make_rejection_bar_1m(21210.0, 21200.0, "long"),
         ]
-        result = mgr.check_proximity(21300.0, "long", bars_1m, [])
-        # This is within proximity but the bar rejection is at a different price
-        # The key test is that the threshold calculation uses per-level ATR
+        result = mgr.check_proximity(21220.0, "long", bars_1m, [])
+        # Within fixed 25pt proximity for daily level
         assert result["nearest_level"] is not None
 
 

@@ -28,12 +28,15 @@ logger = structlog.get_logger()
 # Constants
 # ---------------------------------------------------------------------------
 
-# Proximity multipliers per timeframe (fraction of level's own ATR)
-PROXIMITY_MULT: dict[str, float] = {
-    "1h": 0.5,
-    "4h": 0.75,
-    "D": 1.0,
-    "W": 1.5,
+# Fixed proximity thresholds in points — price must be within this
+# distance of a zone edge to score.  ATR-based was too wide (2000+ pts
+# for weekly), causing structure to score when price was nowhere near
+# the actual zone.
+PROXIMITY_POINTS: dict[str, float] = {
+    "1h": 15.0,   # within 15pts of an hourly zone edge
+    "4h": 20.0,   # within 20pts of a 4h zone edge
+    "D": 25.0,    # within 25pts of a daily zone edge
+    "W": 30.0,    # within 30pts of a weekly zone edge
 }
 
 # Anti-signal multiplier (uses daily_atr for D and W)
@@ -414,10 +417,11 @@ class StructureLevelManager:
             result["detail"] = "no levels for side"
             return result
 
-        # --- Find nearby levels within proximity threshold ---
+        # --- Find nearby levels within fixed point proximity ---
+        # Price must be within X points of the zone edge to score.
         nearby: list[tuple[StructureLevel, float]] = []
         for lv in side_levels:
-            threshold = PROXIMITY_MULT.get(lv.timeframe, 1.0) * lv.timeframe_atr
+            threshold = PROXIMITY_POINTS.get(lv.timeframe, 20.0)
             dist = self._distance_to_zone(price, lv)
             if dist <= threshold:
                 nearby.append((lv, dist))
@@ -427,7 +431,7 @@ class StructureLevelManager:
             if side_levels:
                 closest = min(side_levels, key=lambda lv: self._distance_to_zone(price, lv))
                 closest_dist = self._distance_to_zone(price, closest)
-                closest_thresh = PROXIMITY_MULT.get(closest.timeframe, 1.0) * closest.timeframe_atr
+                closest_thresh = PROXIMITY_POINTS.get(closest.timeframe, 20.0)
                 logger.info(
                     "structure_levels.nearest_level",
                     side=side,
@@ -456,6 +460,21 @@ class StructureLevelManager:
         # Update touch tracking
         best_level.last_tested = datetime.now(tz=UTC)
         best_level.touch_count += 1
+
+        # --- 30-minute cooldown per level ---
+        # After a level scores, don't re-score it for 30 minutes.
+        # Prevents the system from re-entering the same trade repeatedly.
+        LEVEL_COOLDOWN_SEC = 1800  # 30 minutes
+        last_scored = getattr(best_level, "_last_scored_at", None)
+        if last_scored is not None:
+            age = (datetime.now(tz=UTC) - last_scored).total_seconds()
+            if age < LEVEL_COOLDOWN_SEC:
+                result = dict(empty_result)
+                result["blocked"] = blocked
+                result["block_reason"] = block_reason
+                result["nearest_level"] = best_level
+                result["detail"] = f"level on cooldown ({int(LEVEL_COOLDOWN_SEC - age)}s remaining)"
+                return result
 
         # --- Bounce detection (multi-bar confirmation) ---
         bounce_score = 0
@@ -492,11 +511,13 @@ class StructureLevelManager:
 
         detail_parts: list[str] = []
         if bounce_score:
+            best_level._last_scored_at = datetime.now(tz=UTC)  # Start cooldown
             detail_parts.append(
                 f"bounce at {best_level.timeframe} "
                 f"{best_level.level_type} {best_level.zone_low:.0f}-{best_level.zone_high:.0f}"
             )
         if bos_score and bos_level:
+            bos_level._last_scored_at = datetime.now(tz=UTC)  # Start cooldown
             detail_parts.append(
                 f"BOS through {bos_level.timeframe} {bos_level.level_type} "
                 f"at {bos_level.zone_low:.0f}-{bos_level.zone_high:.0f}"

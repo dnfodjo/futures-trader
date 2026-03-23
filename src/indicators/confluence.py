@@ -115,9 +115,9 @@ class ConfluenceEngine:
     when evaluating a potential entry.
     """
 
-    # Timeframe-weighted points for structure factor
+    # Timeframe-weighted points for structure factor (capped at 2)
     BOUNCE_POINTS: dict[str, int] = {"1h": 1, "4h": 1, "D": 2, "W": 2}
-    BOS_POINTS: dict[str, int] = {"1h": 1, "4h": 2, "D": 2, "W": 3}
+    BOS_POINTS: dict[str, int] = {"1h": 1, "4h": 1, "D": 2, "W": 2}
 
     def __init__(self, structure_manager: StructureLevelManager | None = None) -> None:
         # Order blocks per side
@@ -994,7 +994,7 @@ class ConfluenceEngine:
             score = pts
             details.append(f"bounce at {tf} {level.level_type} (+{pts})")
 
-        score = min(score, 3)  # Safety cap
+        score = min(score, 2)  # Cap: structure adds conviction, doesn't dominate
 
         return {
             "score": score,

@@ -83,7 +83,7 @@ class TestStructureConstants:
         assert ConfluenceEngine.BOUNCE_POINTS == {"1h": 1, "4h": 1, "D": 2, "W": 2}
 
     def test_bos_points(self):
-        assert ConfluenceEngine.BOS_POINTS == {"1h": 1, "4h": 2, "D": 2, "W": 3}
+        assert ConfluenceEngine.BOS_POINTS == {"1h": 1, "4h": 1, "D": 2, "W": 2}
 
 
 # ── _score_structure ─────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ class TestScoreStructure:
         }
         engine = ConfluenceEngine(structure_manager=mgr)
         result = engine._score_structure("long", 21000.0, [], [])
-        assert result["score"] == 3  # W BOS = 3 pts, but capped at 3
+        assert result["score"] == 2  # W BOS = 2 pts (capped at 2)
         assert "BOS" in result["detail"]
 
     def test_bos_priority_over_bounce(self):
@@ -147,7 +147,7 @@ class TestScoreStructure:
         }
         engine = ConfluenceEngine(structure_manager=mgr)
         result = engine._score_structure("long", 21000.0, [], [])
-        assert result["score"] == 2  # 4h BOS = 2 (not bounce 1)
+        assert result["score"] == 1  # 4h BOS = 1 (capped, not bounce 1)
         assert "BOS" in result["detail"]
 
     def test_score_capped_at_3(self):
