@@ -694,15 +694,28 @@ class TradingOrchestrator:
                     ),
                 )
                 if should_exit:
-                    logger.warning("confluence.mechanical_exit", reason=exit_reason)
-                    exit_action = LLMAction(
-                        action=ActionType.FLATTEN,
-                        reasoning=f"Mechanical exit: {exit_reason}",
-                        confidence=1.0,
-                        model_used="mechanical",
-                    )
-                    await self._execute_confluence_action(exit_action, state, position)
-                    return
+                    # Entropy/mechanical cooldown: skip non-critical exits
+                    # if position is less than 120 seconds old.  Daily loss
+                    # limit exits ("DAILY_LOSS_LIMIT") always fire immediately.
+                    is_critical = "DAILY_LOSS_LIMIT" in exit_reason or "SESSION_BOUNDARY" in exit_reason
+                    position_age = time.monotonic() - self._last_entry_time
+                    if not is_critical and position_age < 120.0:
+                        logger.info(
+                            "confluence.mechanical_exit_cooldown",
+                            reason=exit_reason,
+                            position_age_sec=round(position_age, 1),
+                            msg="Skipping mechanical exit — position too young (< 120s)",
+                        )
+                    else:
+                        logger.warning("confluence.mechanical_exit", reason=exit_reason)
+                        exit_action = LLMAction(
+                            action=ActionType.FLATTEN,
+                            reasoning=f"Mechanical exit: {exit_reason}",
+                            confidence=1.0,
+                            model_used="mechanical",
+                        )
+                        await self._execute_confluence_action(exit_action, state, position)
+                        return
 
             # LLM exit assessment DISABLED — trail stop monitor manages all exits.
             # The LLM was exiting after 18 seconds with 12pts unrealized profit

@@ -59,8 +59,8 @@ class TickStopMonitor:
         self,
         flatten_fn: FlattenFn,
         target_symbol: str = "",
-        trail_distance: float = 12.0,       # was 10 — wider trail gives trades room
-        trail_activation_points: float = 10.0,  # was 8 — don't trail until solid profit
+        trail_distance: float = 15.0,       # was 12 — wider trail prevents rapid exits
+        trail_activation_points: float = 20.0,  # was 10 — don't trail until solid profit
         min_stop_distance: float = 5.0,      # was 4 — never trail closer than 5pts
         tighten_at_profit: float = 25.0,     # was 20 — only tighten at big profit
         tightened_distance: float = 6.0,     # was 5 — still give room at high profit
@@ -112,6 +112,11 @@ class TickStopMonitor:
         # Prevents instant stop-outs from stale entry prices or transient ticks.
         self._grace_period_sec: float = 3.0
         self._activation_time: float = 0.0
+
+        # Minimum hold time — don't allow trail-based or partial exits
+        # within this period.  Hard stop (initial stop loss) always triggers.
+        self._min_hold_sec: float = 60.0
+        self._initial_stop_price: float = 0.0
 
         # Partial profit taking
         self._partial_taken: bool = False
@@ -168,6 +173,7 @@ class TickStopMonitor:
         self._side = side.lower()
         self._entry_price = entry_price
         self._stop_price = stop_price
+        self._initial_stop_price = stop_price  # remember hard stop for min-hold bypass
         self._take_profit_price = take_profit_price
         self._best_price = entry_price
         self._trail_active = False
@@ -341,8 +347,36 @@ class TickStopMonitor:
         elapsed = time.monotonic() - self._activation_time
         in_grace = elapsed < self._grace_period_sec
 
-        # Update trail (always, even during grace period)
+        # Update trail (always, even during grace period / min hold)
         self._update_trail(price)
+
+        # Min-hold check: within the first N seconds, only allow hard-stop exits.
+        # Trail stops, partials, and take-profits are suppressed to prevent
+        # rapid exits (trades lasting 2-41 seconds).
+        in_min_hold = elapsed < self._min_hold_sec
+
+        # Check hard stop FIRST — always triggers regardless of min hold.
+        # A "hard stop" is when price breaches the *initial* stop level.
+        if not in_grace and self._check_hard_stop(price):
+            self._triggered = True
+            self._trigger_reason = "stop_hit"
+            self._trigger_price = price
+            logger.warning(
+                "tick_stop_monitor.STOP_HIT",
+                side=self._side,
+                entry=self._entry_price,
+                stop=self._stop_price,
+                price=price,
+                ticks_in_trade=self._ticks_processed,
+                best_price=self._best_price,
+                hard_stop=True,
+            )
+            await self._execute_flatten(price)
+            return
+
+        # Everything below is suppressed during min-hold period
+        if in_min_hold:
+            return
 
         # Check partial profit (skip during grace period)
         if (
@@ -355,7 +389,7 @@ class TickStopMonitor:
             self._partial_taken = True
             await self._execute_partial(price)
 
-        # Check stop-loss (skip during grace period)
+        # Check trail-based stop-loss (skip during grace period)
         if not in_grace and self._check_stop(price):
             self._triggered = True
             self._trigger_reason = "stop_hit"
@@ -389,8 +423,23 @@ class TickStopMonitor:
             await self._execute_flatten(price)
             return
 
+    def _check_hard_stop(self, price: float) -> bool:
+        """Check if the *initial* hard stop has been hit.
+
+        This uses ``_initial_stop_price`` (the stop set at entry) so it
+        always triggers even during the min-hold period.  The trailing
+        stop (``_stop_price``) may have moved; this method ignores that.
+        """
+        if self._initial_stop_price <= 0:
+            return False
+        if self._side == "long":
+            return price <= self._initial_stop_price
+        elif self._side == "short":
+            return price >= self._initial_stop_price
+        return False
+
     def _check_stop(self, price: float) -> bool:
-        """Check if stop-loss has been hit."""
+        """Check if stop-loss has been hit (trail or initial)."""
         if self._stop_price <= 0:
             return False
 

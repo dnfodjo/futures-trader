@@ -46,6 +46,7 @@ class TestPartialProfitLong:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -74,6 +75,7 @@ class TestPartialProfitLong:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -95,6 +97,7 @@ class TestPartialProfitLong:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -130,6 +133,7 @@ class TestPartialProfitShort:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="short",
@@ -158,6 +162,7 @@ class TestPartialProfitShort:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="short",
@@ -183,6 +188,7 @@ class TestPartialEdgeCases:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -231,6 +237,7 @@ class TestPartialEdgeCases:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -249,6 +256,7 @@ class TestPartialEdgeCases:
         """When partial_fn is None, no partial should fire."""
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -268,6 +276,7 @@ class TestPartialEdgeCases:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -293,6 +302,7 @@ class TestPartialStatePersistence:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
@@ -318,6 +328,7 @@ class TestPartialStatePersistence:
         partial_fn = AsyncMock()
         monitor = _make_monitor()
         monitor._grace_period_sec = 0.0
+        monitor._min_hold_sec = 0.0
 
         monitor.activate(
             side="long",
