@@ -625,6 +625,7 @@ class TradingOrchestrator:
         # 1. Get current market state
         state = self._get_market_state()
         if state is None:
+            logger.warning("confluence.cycle_skipped_no_state", cycle=self._cycle_count)
             return
         self._last_state = state
 
