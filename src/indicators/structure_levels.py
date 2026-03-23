@@ -423,6 +423,23 @@ class StructureLevelManager:
                 nearby.append((lv, dist))
 
         if not nearby:
+            # Log nearest levels for debugging (find closest even if outside threshold)
+            if side_levels:
+                closest = min(side_levels, key=lambda lv: self._distance_to_zone(price, lv))
+                closest_dist = self._distance_to_zone(price, closest)
+                closest_thresh = PROXIMITY_MULT.get(closest.timeframe, 1.0) * closest.timeframe_atr
+                logger.debug(
+                    "structure_levels.nearest_level",
+                    side=side,
+                    price=round(price, 2),
+                    nearest_price=round(closest.price, 2),
+                    nearest_zone=f"{closest.zone_low:.0f}-{closest.zone_high:.0f}",
+                    nearest_tf=closest.timeframe,
+                    nearest_type=closest.level_type,
+                    distance=round(closest_dist, 2),
+                    threshold=round(closest_thresh, 2),
+                    gap=round(closest_dist - closest_thresh, 2),
+                )
             # Still return anti-signal info even if no nearby side levels
             result = dict(empty_result)
             result["blocked"] = blocked
