@@ -1457,12 +1457,13 @@ class StateEngine:
         # immediately after startup — not 0.0 waiting for the first live tick.
         last_close = last_bar.get("close", 0.0)
         if last_close > 0:
-            # Seed the tick processor's last price so all systems
+            # Seed the tick processor's session_close so all systems
             # (confluence, structure, debug_state) see a valid price
             # immediately — not 0.0 waiting for first live tick.
             try:
-                if hasattr(self._tick_processor, "_last_price") and self._tick_processor._last_price <= 0:
-                    self._tick_processor._last_price = last_close
+                session = getattr(self._tick_processor, "_session", None)
+                if session is not None and getattr(session, "session_close", 0.0) <= 0:
+                    session.session_close = last_close
                     logger.info(
                         "state_engine.last_price_from_warmup",
                         price=last_close,
