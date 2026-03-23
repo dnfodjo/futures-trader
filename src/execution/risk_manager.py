@@ -44,7 +44,7 @@ class SessionRiskParams:
 _SESSION_PARAMS: dict[SessionPhase, SessionRiskParams] = {
     # Overnight — TP 100 pts (tighter ranges)
     SessionPhase.ASIAN: SessionRiskParams(
-        sl_points=30, tp_points=100, min_confluence=4, min_confidence=0.80,
+        sl_points=30, tp_points=100, min_confluence=3, min_confidence=0.80,
         max_trades_per_session=3,
     ),
     SessionPhase.LONDON: SessionRiskParams(
@@ -65,7 +65,7 @@ _SESSION_PARAMS: dict[SessionPhase, SessionRiskParams] = {
         max_trades_per_session=3,
     ),
     SessionPhase.MIDDAY: SessionRiskParams(
-        sl_points=40, tp_points=150, min_confluence=4, min_confidence=0.75,
+        sl_points=40, tp_points=150, min_confluence=3, min_confidence=0.75,
         extra_entropy_check=True, max_entropy=0.6,
         max_trades_per_session=3,
     ),
