@@ -238,6 +238,19 @@ class ConfluenceEngine:
         structure_result = self._score_structure(side, last_price, bars_1m, bars_5m or [])
         factors["structure"] = structure_result
 
+        # Always log structure detail for monitoring (even when score=0)
+        if structure_result.get("detail") and structure_result["detail"] != "no HTF structure":
+            nearest = structure_result.get("nearest_level")
+            logger.info(
+                "confluence.structure_debug",
+                side=side,
+                score=structure_result["score"],
+                detail=structure_result["detail"],
+                price=round(last_price, 2),
+                nearest_zone=f"{nearest.zone_low:.0f}-{nearest.zone_high:.0f}" if nearest else "none",
+                nearest_tf=nearest.timeframe if nearest else "none",
+            )
+
         # Structure block (trading against D/W levels)
         if structure_result.get("blocked"):
             blocked = True
