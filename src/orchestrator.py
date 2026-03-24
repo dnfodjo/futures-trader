@@ -606,9 +606,14 @@ class TradingOrchestrator:
             self._cycle_count += 1
 
             # ── Scoring watchdog: detect stalled scoring loop ─────────
+            # Only trigger when FLAT — during active positions, the tick
+            # stop monitor runs instead of the scoring loop, so scoring
+            # age will naturally exceed 120s.  That's expected, not a bug.
+            has_position = self._position_tracker.position is not None
             if (self._last_score_time > 0
                     and time.monotonic() - self._last_score_time > 120
-                    and self._cycle_count > 5):
+                    and self._cycle_count > 5
+                    and not has_position):
                 logger.error(
                     "orchestrator.scoring_watchdog_triggered",
                     last_score_age_sec=round(time.monotonic() - self._last_score_time, 1),
